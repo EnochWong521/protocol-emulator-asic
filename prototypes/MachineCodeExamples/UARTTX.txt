@@ -1,0 +1,19 @@
+LOAD    DATA, 0xFF       
+LOAD    COUNT, 8          ; UART will send 8 data bits
+
+SET     TX, HIGH          ; IDLE
+
+SET     TX, LOW           ; START
+WAIT    BIT_TIME          ; Hold start one baud
+
+DATA_LOOP:
+SHIFT_OUT DATA, TX       
+WAIT      BIT_TIME        
+
+DEC       COUNT           ; decrement count till 0
+JNEZ       DATA_LOOP      ; If count not 0 jump
+
+SET     TX, HIGH          ; STOP
+WAIT    BIT_TIME          ; 
+
+DONE                      

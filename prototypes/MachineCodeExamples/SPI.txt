@@ -1,0 +1,24 @@
+LOAD TX_DATA, 0xFF
+LOAD COUNT, 8
+
+SET CS, LOW 
+SET CLK, LOW
+
+SPI_LOOP:
+    SHIFT_OUT TX_DATA, MOSI         
+
+    WAIT HALF_PERIOD                ; wait half for sampling
+    SET CLK, HIGH                   
+
+    SHIFT_IN MISO, RX_DATA          ; sample MISO pin
+
+    WAIT HALF_PERIOD                ; finish an SPI bit
+
+    SET CLK, LOW                    ; bring clock low
+
+    DEC COUNT
+    JNEZ SPI_LOOP                   ; loop until we send/recive 8 bits
+
+SET CS, HIGH                        ; deselect the slave after transmission
+
+DONE

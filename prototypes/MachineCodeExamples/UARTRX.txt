@@ -1,0 +1,18 @@
+LOAD COUNT, 8
+
+WAIT_PIN RX, LOW        ; wait for start command
+
+WAIT BIT_TIME_HALF      ; wait .5 baud. needs to be calculated on compile
+WAIT BIT_TIME
+
+LOOP:
+    SHIFT_IN RX, DATA   ; shift a bit in 
+    DEC COUNT
+    WAIT BIT_TIME
+    JNEZ LOOP           ; until we recieve 8 bits LOOP
+
+RX_DONE:
+                        ; design of loop will wait into stop bit 
+READ RX, TEMP           ; read the stop bit
+
+DONE
