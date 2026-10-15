@@ -1,0 +1,12 @@
+DRIVE_LOW  TX
+WAIT       T_BIT
+
+LOOP_INIT  8
+
+tx_loop:
+    SHIFT_OUT  TX, R0
+    WAIT       T_BIT
+    LOOP_BACK  tx_loop
+
+DRIVE_HIGH TX
+WAIT       T_BIT
