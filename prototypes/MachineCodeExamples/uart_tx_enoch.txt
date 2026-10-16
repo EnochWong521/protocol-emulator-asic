@@ -1,12 +1,13 @@
-DRIVE_LOW  TX
-WAIT       T_BIT
+    MOV_IMM   R0, 0xA5
+    WAIT_C    434
 
-LOOP_INIT  8
+    SHIFT_OUT TX, LOW
+    WAIT      FULL
 
 tx_loop:
-    SHIFT_OUT  TX, R0
-    WAIT       T_BIT
-    LOOP_BACK  tx_loop
+    SHIFT_OUT TX, R0
+    WAIT      FULL
+    LOOP      8, tx_loop
 
-DRIVE_HIGH TX
-WAIT       T_BIT
+    SHIFT_OUT TX, HIGH
+    WAIT      FULL
