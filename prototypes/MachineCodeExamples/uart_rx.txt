@@ -1,0 +1,23 @@
+WAIT_C T_RX
+SET_DIR RIGHT
+
+rx_start:
+    WAIT_PIN RX, FALLING
+    WAIT HALF
+    BRANCH_PIN RX, HIGH, rx_start
+
+    WAIT FULL
+
+rx_loop:
+    SHIFT_IN R1, RX
+    WAIT FULL
+    LOOP 8, rx_loop
+
+    BRANCH_PIN RX, LOW, framing_error
+    PUSH R1
+    JMP rx_start
+
+framing_error:
+    WAIT_PIN RX, HIGH
+    JMP rx_start
+  

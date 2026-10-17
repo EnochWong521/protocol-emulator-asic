@@ -1,0 +1,18 @@
+WAIT_C T_TX
+SET_DIR RIGHT
+SHIFT_OUT R0, TX, HIGH
+
+send_next:
+    PULL R0
+    SHIFT_OUT R0, TX, LOW
+    WAIT FULL
+
+tx_loop:
+    SHIFT_OUT R0, TX, SHIFT
+    WAIT FULL
+    LOOP 8, tx_loop
+
+    SHIFT_OUT R0, TX, HIGH
+    WAIT FULL
+    JMP send_next
+  
