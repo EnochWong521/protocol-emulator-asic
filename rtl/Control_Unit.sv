@@ -28,7 +28,7 @@ module control_unit (
         end
         else begin
             state <= next_state;
-
+        //save the previous opcode for 2 cycle instructions
             if(state == FETCH)
                 opcode_prev <= inst[7:5];
         end
@@ -62,25 +62,33 @@ module control_unit (
                     PC_update = 1;
                     next_state = EXECUTE;
                 end
-
             end
 
             FETCH_BYTE_2: begin
-    //WAIT_C BYTE2
+                //WAIT_C
                 if(opcode_prev == 3'b000) begin
                     wait_config_L = 1;
                     PC_update = 1;
-                    next_state = FETCH;
+                    next_state = EXECUTE;
                 end
+
             end
 
             EXECUTE: begin
-                wait_start = 1;
-                if(wait_done == 1) begin
+                //WAIT_C
+                if(opcode_prev == 3'b000) begin
                     next_state = FETCH;
                 end
-                else begin
-                    next_state = WAITING;
+
+                //WAIT
+                else if(opcode_prev == 3'b001) begin
+                    wait_start = 1;
+                    if(wait_done == 1) begin
+                        next_state = FETCH;
+                    end
+                    else begin
+                        next_state = WAITING;
+                    end
                 end
             end
 
@@ -95,5 +103,4 @@ module control_unit (
             default: next_state = IDLE;
         endcase
     end
-
 endmodule
