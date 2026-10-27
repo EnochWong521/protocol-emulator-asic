@@ -3,7 +3,7 @@
 Status: **UART-capable implementation proposal** (not yet verified in RTL). This is a *revised design* based on the team's `ISA.md`, not a transcription of that draft.
 
 ## Design contract
-
+-
 - 8 primary opcodes, 3 bits each, in instruction bits `[7:5]`.
 - Byte-addressed program memory, initially 256 x 8; PC is 8 bits, reset PC = `0x00`.
 - Instructions occupy 1 or 2 bytes. First byte always has the opcode; the opcode and submode determine the length. A 2-byte instruction has its payload at `PC+1`.
