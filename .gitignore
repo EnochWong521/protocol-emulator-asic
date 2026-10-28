@@ -1,1 +1,6 @@
+# Mac file access
 .DS_Store
+
+# Icarus Verilog simulation outputs
+*.vvp
+*.vcd
