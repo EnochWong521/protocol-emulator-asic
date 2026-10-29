@@ -11,7 +11,6 @@ module wait_timer (
     output logic        wait_is_last_cycle,
 );
 
-
   // timer configuration register
   logic [12:0] t_reg;
 
@@ -54,10 +53,10 @@ module wait_timer (
       wait_remaining <= 13'd0;
     // load counter with wait duration
     // minus 1 because execute stage consumes one cycle
-    end else if (wait_duration) begin
+    end else if (wait_start) begin
       wait_remaining <= wait_duration - 13'd1;
     // countdown
-    end else begin
+    end else if (wait_tick) begin
       wait_remaining <= wait_remaining - 13'd1;
     end
   end

@@ -4,3 +4,6 @@
 # Icarus Verilog simulation outputs
 *.vvp
 *.vcd
+
+# Windows metadata
+*:Zone.Identifier
