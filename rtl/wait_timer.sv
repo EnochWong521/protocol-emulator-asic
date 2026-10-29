@@ -41,7 +41,7 @@ module wait_timer (
       SET_DIR: wait_duration = 13'd0;
     end case
 
-    if (wait_duration != SET_DIR && wait_duration == 13'd0) begin
+    if (wait_mode != SET_DIR && wait_duration == 13'd0) begin
       wait_duration = 13'd1;
     end
   end
