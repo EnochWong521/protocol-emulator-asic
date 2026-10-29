@@ -9,9 +9,6 @@ module wait_timer (
 
     output logic        wait_is_single_cycle,
     output logic        wait_is_last_cycle,
-    output logic [12:0] t_reg,
-    output logic [12:0] wait_remaining,
-    output logic [12:0] wait_duration
 );
 
 
