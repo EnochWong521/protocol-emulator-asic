@@ -7,7 +7,7 @@ module control_unit (
     output  logic         wait_start,
     output  logic         wait_config_U,
     output  logic         wait_config_L,
-    output  logic         PC_update,
+    output  logic         pc_update,
     output  logic         direction
 );
 
@@ -54,7 +54,7 @@ module control_unit (
         wait_start = 0;
         wait_config_U = 0;
         wait_config_L = 0;
-        PC_update = 0;
+        pc_update = 0;
 
         case(state)
 
@@ -67,13 +67,13 @@ module control_unit (
                 //WAIT_C
                 if(inst[7:5] == 3'b000) begin
                     wait_config_U = 1;
-                    PC_update = 1;
+                    pc_update = 1;
                     next_state = FETCH_BYTE_2;
                 end
 
                 //WAIT / SET_DIR
                 else if(inst[7:5] == 3'b001) begin
-                    PC_update = 1;
+                    pc_update = 1;
                     next_state = EXECUTE;
                 end
             end
@@ -83,7 +83,7 @@ module control_unit (
                 //WAIT_C
                 if(opcode_prev == 3'b000) begin
                     wait_config_L = 1;
-                    PC_update = 1;
+                    pc_update = 1;
                     next_state = EXECUTE;
                 end
             end

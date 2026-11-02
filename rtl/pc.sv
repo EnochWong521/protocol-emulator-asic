@@ -1,15 +1,17 @@
-module program_counter (
-    input   logic       clk,
-    input   logic       reset,
-    input   logic       PC_update,
+module pc (
+    input logic clk,
+    input logic reset,
+    input logic pc_write_en,
+    input logic [7:0] pc_next,
 
-    output  logic [7:0] PC
+    output  logic [7:0] pc
 );
     always_ff @(posedge clk) begin
-        if (reset == 1)
-            PC <= 8'b00000000;
-        else if (PC_update == 1)
-            PC <= PC + 1;
+        if (reset) begin
+            pc <= 8'd0;
+        end else if (pc_write_en) begin
+            pc <= pc_next;
+        end
     end
 
 endmodule
