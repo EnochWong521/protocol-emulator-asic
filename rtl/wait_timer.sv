@@ -8,7 +8,7 @@ module wait_timer (
     input  logic        wait_tick,
 
     output logic        wait_is_single_cycle,
-    output logic        wait_is_last_cycle,
+    output logic        wait_is_last_cycle
 );
 
   // timer configuration register
@@ -33,12 +33,14 @@ module wait_timer (
   logic [12:0] wait_duration;
 
   always_comb begin
+    wait_duration = 13'd0;
+
     unique case (wait_mode)
       WAIT_FULL : wait_duration = t_reg;
       WAIT_HALF : wait_duration = t_reg >> 1;
       WAIT_QUARTER : wait_duration = t_reg >> 2;
-      SET_DIR: wait_duration = 13'd0;
-    end case
+      SET_DIR : wait_duration = 13'd0;
+    endcase
 
     if (wait_mode != SET_DIR && wait_duration == 13'd0) begin
       wait_duration = 13'd1;
