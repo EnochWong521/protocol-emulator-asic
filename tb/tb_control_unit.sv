@@ -1,4 +1,4 @@
-// Controller/PC integration with the real WAIT timer and atomic WAIT_C checks.
+// Controller/PC integration: atomic WAIT_C writes and exact WAIT cycle timing.
 // Run from the repository root:
 // iverilog -g2012 -s tb_control_unit -o /tmp/tb_control_unit.vvp \
 //   rtl/isa_pkg.sv rtl/pc.sv rtl/wait_timer.sv rtl/control_unit.sv tb/tb_control_unit.sv
@@ -36,6 +36,11 @@ module tb_control_unit;
     integer expected_duration;
     integer completed_count;
     integer active_cycles;
+    int unsigned clock_edges = 0;
+    int timing_wait_cases = 0;
+    int timing_program_cases = 0;
+
+    always @(posedge clk) clock_edges++;
 
     //control unit
     control_unit dut (
@@ -83,6 +88,119 @@ module tb_control_unit;
         if (dut.state !== expected_state || pc !== expected_pc || timer.t_reg !== expected_t)
             $fatal(1, "FAIL: atomic sequence state=%b PC=%h T=%h",
                    dut.state, pc, timer.t_reg);
+    endtask
+
+    // Expected durations are supplied as literal reference-table values, not
+    // derived from the timer's flags or arithmetic. Check every execution edge.
+    task automatic run_wait_timing(input int unsigned t,
+                                   input int unsigned full_d,
+                                   input int unsigned half_d,
+                                   input int unsigned quarter_d);
+        logic [T_WIDTH-1:0] t_value;
+        logic [PC_WIDTH-1:0] wait_pc;
+        logic [INST_WIDTH-1:0] expected_ir;
+        int unsigned program_first_edge, wait_first_edge, duration;
+        int unsigned start_edges, tick_edges, measured_cycles;
+
+        @(negedge clk);
+        check_program = 0;
+        reset = 1;
+        t_value = T_WIDTH'(t);
+        for (int i = 0; i < 256; i++)
+            memory[i] = 8'hFF;
+        memory[0] = {OP_WAIT_C, t_value[T_WIDTH-1:INST_WIDTH]};
+        memory[1] = t_value[INST_WIDTH-1:0];
+        memory[2] = {OP_WAIT, WAIT_FULL, WAIT_ARG_REQUIRED};
+        memory[3] = {OP_WAIT, WAIT_HALF, WAIT_ARG_REQUIRED};
+        memory[4] = {OP_WAIT, WAIT_QUARTER, WAIT_ARG_REQUIRED};
+        @(posedge clk); #1;
+        if (pc !== 0 || dut.state !== dut.FETCH || timer.wait_remaining !== '0)
+            $fatal(1, "FAIL: reset before timing case T=%0d", t);
+        @(negedge clk);
+        reset = 0;
+        program_first_edge = clock_edges;
+
+        // WAIT_C takes exactly three edges and writes T only at EXECUTE.
+        check_atomic_step(dut.FETCH_OPERAND, 8'd0, T_RESET_VALUE);
+        check_atomic_step(dut.EXECUTE, 8'd0, T_RESET_VALUE);
+        if (wait_c_write !== 1'b1 || t_write_data !== t_value || pc_sel !== PC_PLUS_2)
+            $fatal(1, "FAIL: WAIT_C completion controls T=%0d", t);
+        check_atomic_step(dut.FETCH, 8'd2, t_value);
+        if (clock_edges - program_first_edge != 3)
+            $fatal(1, "FAIL: WAIT_C did not take three cycles");
+
+        for (int mode_index = 0; mode_index < 3; mode_index++) begin
+            case (mode_index)
+                0: duration = full_d;
+                1: duration = half_d;
+                default: duration = quarter_d;
+            endcase
+            wait_pc = PC_WIDTH'(2 + mode_index);
+            expected_ir = memory[wait_pc];
+            wait_first_edge = clock_edges;
+            start_edges = 0;
+            tick_edges = 0;
+
+            // Exactly one fetch edge precedes the D execution edges.
+            #1;
+            if (dut.state !== dut.FETCH || pc !== wait_pc || inst_addr !== wait_pc ||
+                pc_sel !== PC_HOLD || {wait_c_write, wait_start, wait_tick} !== 3'b000 ||
+                timer.wait_remaining !== '0)
+                $fatal(1, "FAIL: WAIT fetch T=%0d mode=%0d", t, mode_index);
+            @(posedge clk); #1;
+            if (dut.state !== dut.EXECUTE || pc !== wait_pc || dut.ir !== expected_ir)
+                $fatal(1, "FAIL: WAIT fetch added/lost a cycle");
+
+            for (int unsigned e = 0; e < duration; e++) begin
+                #1;
+                if (pc !== wait_pc || dut.ir !== expected_ir ||
+                    dut.imm !== t_value[INST_WIDTH-1:0] || timer.t_reg !== t_value ||
+                    wait_mode !== mode_index[1:0] || wait_c_write !== 1'b0)
+                    $fatal(1, "FAIL: WAIT state changed early T=%0d mode=%0d edge=%0d",
+                           t, mode_index, e);
+                if (e == 0) begin
+                    if (dut.state !== dut.EXECUTE || wait_start !== 1'b1 ||
+                        wait_tick !== 1'b0 || wait_is_single_cycle !== (duration == 1) ||
+                        timer.wait_duration !== T_WIDTH'(duration))
+                        $fatal(1, "FAIL: first EXECUTE edge T=%0d mode=%0d", t, mode_index);
+                end
+                else begin
+                    if (dut.state !== dut.WAIT_REMAIN || wait_start !== 1'b0 ||
+                        wait_tick !== 1'b1 || timer.wait_remaining !== T_WIDTH'(duration-e) ||
+                        wait_is_last_cycle !== (e == duration-1))
+                        $fatal(1, "FAIL: countdown T=%0d mode=%0d edge=%0d", t, mode_index, e);
+                end
+                if (pc_sel !== ((e == duration-1) ? PC_PLUS_1 : PC_HOLD))
+                    $fatal(1, "FAIL: PC selection before final WAIT edge");
+                if (wait_start) start_edges++;
+                if (wait_tick) tick_edges++;
+                @(posedge clk); #1;
+                if (timer.wait_remaining !== T_WIDTH'(duration-e-1) ||
+                    timer.t_reg !== t_value || dut.ir !== expected_ir ||
+                    dut.imm !== t_value[INST_WIDTH-1:0])
+                    $fatal(1, "FAIL: post-edge countdown or retention");
+                if (e == duration-1) begin
+                    if (dut.state !== dut.FETCH || pc !== wait_pc + PC_WIDTH'(ONE_BYTE) ||
+                        wait_is_last_cycle !== 1'b0 || pc_sel !== PC_HOLD)
+                        $fatal(1, "FAIL: WAIT did not complete on its Dth execution edge");
+                end
+                else if (dut.state !== dut.WAIT_REMAIN || pc !== wait_pc)
+                    $fatal(1, "FAIL: WAIT completed before its Dth execution edge");
+            end
+            if (start_edges != 1 || tick_edges != duration-1 ||
+                clock_edges - wait_first_edge != duration+1)
+                $fatal(1, "FAIL: expected one start, D-1 ticks and D+1 total cycles");
+            timing_wait_cases++;
+        end
+
+        measured_cycles = clock_edges - program_first_edge;
+        if (measured_cycles != 6 + full_d + half_d + quarter_d || pc !== 8'd5)
+            $fatal(1, "FAIL: timing program total T=%0d cycles=%0d", t, measured_cycles);
+        if (t == 434 && measured_cycles != 765)
+            $fatal(1, "FAIL: reference program must take 765 cycles");
+        timing_program_cases++;
+        $display("PASS: T=%0d FULL=%0d HALF=%0d QUARTER=%0d; program=%0d cycles",
+                 t, full_d, half_d, quarter_d, measured_cycles);
     endtask
 
     //combinational instruction-memory read
@@ -289,18 +407,29 @@ module tb_control_unit;
             $fatal(1, "FAIL: timer did not finish");
 
         $display("");
-        $display("ALL TESTS PASSED");
+        $display("PASS: original WAIT program");
         $display("WAIT instructions: %0d", wait_count);
         $display("WAIT_C instructions: %0d", config_count);
         $display("Instruction completions: %0d in %0d active cycles", completed_count, active_cycles);
         $display("Final PC: %0d", pc);
 
+        // Microarchitecture reference table: T, FULL D, HALF D, QUARTER D.
+        run_wait_timing(1,       1,    1,    1);
+        run_wait_timing(2,       2,    1,    1);
+        run_wait_timing(3,       3,    1,    1);
+        run_wait_timing(4,       4,    2,    1);
+        run_wait_timing(7,       7,    3,    1);
+        run_wait_timing(434,   434,  217,  108);
+        run_wait_timing(8191, 8191, 4095, 2047);
+        if (timing_wait_cases != 21 || timing_program_cases != 7)
+            $fatal(1, "FAIL: timing coverage incomplete");
+        $display("ALL TESTS PASSED: 21 WAIT timings, 7 WAIT_C timings, 765-cycle reference");
         $finish;
     end
 
     //timeout protection
     initial begin
-        #2000;
+        #500000;
         $fatal(1, "FAIL: simulation timeout");
     end
 
