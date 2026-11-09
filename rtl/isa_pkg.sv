@@ -16,7 +16,7 @@ package isa_pkg;
     // ------------------------------------------------------------
     // Common instruction/memory format
     // ------------------------------------------------------------
-    localparam int INSTR_WIDTH      = 8;
+    localparam int INST_WIDTH       = 8;
     localparam int PC_WIDTH         = 8;
     localparam int REG_WIDTH        = 8;
     localparam int T_WIDTH          = 13;
@@ -27,6 +27,14 @@ package isa_pkg;
     localparam int OPERAND_BYTE_LSB = 0;
     localparam int ONE_BYTE         = 1;
     localparam int TWO_BYTES        = 2;
+
+    // Internal PC control interface, not instruction-byte encodings.
+    // 2'b11 is reserved for a future branch-target selection.
+    typedef enum logic [1:0] {
+        PC_HOLD   = 2'b00,
+        PC_PLUS_1 = 2'b01,
+        PC_PLUS_2 = 2'b10
+    } pc_sel_t;
 
     typedef enum logic [2:0] {
         OP_WAIT_C    = 3'b000,

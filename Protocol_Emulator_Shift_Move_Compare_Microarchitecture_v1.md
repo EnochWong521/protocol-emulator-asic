@@ -272,11 +272,11 @@ The controller may expose these wires continuously; downstream modules use them 
 | `MOVE 11` = CMP_REG | No | `[1:0] != 11` | `exec_cmp_reg` |
 | `WAIT/SET_DIR` (`001`, submode `11`) | No | `[2:1] == 00` | write `shift_dir` |
 
-Illegal/reserved instructions **must not emit writes or retire silently**; reuse the original controller's `illegal_instr` mechanism. PC advances by **1 for a legal one-byte instruction** and **2 for MOV_IMM/CMP_IMM**, **at retirement only**. No PC changes during either fetch state. The existing WAIT timing remains unchanged.
+Illegal/reserved instructions **must not emit writes or retire silently**; reuse the original controller's `illegal_inst` mechanism. PC advances by **1 for a legal one-byte instruction** and **2 for MOV_IMM/CMP_IMM**, **at retirement only**. No PC changes during either fetch state. The existing WAIT timing remains unchanged.
 
 ### 4.5 Top-level `rtl/protocol_core.sv` — Person A
 
-Retain the existing instruction-memory port (`instr_addr[7:0]`, `instr_data[7:0]`), plus `clk`/`rst`. Extend the module with these *pad-facing logic* ports:
+Retain the existing instruction-memory port (`inst_addr[7:0]`, `inst[7:0]`), plus `clk`/`rst`. Extend the module with these *pad-facing logic* ports:
 
 ```systemverilog
 input  logic [3:0] gpio_in_async,
@@ -409,7 +409,7 @@ Avoid creating a dedicated register bank inside each instruction module. Avoid a
 - [ ] `cmp_flag` holds across MOV, SHIFT, WAIT, and SET_DIR, and resets to 0.
 - [ ] `SET_DIR RIGHT/LEFT` updates one persistent bit and **never starts WAIT**.
 - [ ] FETCH versus EXECUTE produces no early or repeated register/flag/GPIO write strobes.
-- [ ] Reserved SHIFT_IN bit patterns, reserved CMP `op=11`, invalid MOV low bits, and invalid SET_DIR fields assert `illegal_instr` without a write.
+- [ ] Reserved SHIFT_IN bit patterns, reserved CMP `op=11`, invalid MOV low bits, and invalid SET_DIR fields assert `illegal_inst` without a write.
 - [ ] PC remains fixed through FETCH states and advances only on final EXECUTE edge: +1 for one-byte operations, +2 for immediate operations.
 
 ### 8.3 Shared end-to-end integration tests
@@ -476,7 +476,7 @@ The preferred split **preserves the team's earlier ownership**: Person A already
 
 ### Each person can work independently
 
-**Person A:** Keep temporary fake `r0_data`/`r1_data` inputs in the standalone comparator testbench; no dependency on B's register bank for comparator unit testing. In control testbench, assert each opcode generates only the intended strobe, with correct PC increment and `illegal_instr` behavior. Implement `SET_DIR` in the controller; do not create a second direction flag in CMP or top level.
+**Person A:** Keep temporary fake `r0_data`/`r1_data` inputs in the standalone comparator testbench; no dependency on B's register bank for comparator unit testing. In control testbench, assert each opcode generates only the intended strobe, with correct PC increment and `illegal_inst` behavior. Implement `SET_DIR` in the controller; do not create a second direction flag in CMP or top level.
 
 **Person B:** Stimulate `shift_move_datapath` directly using `exec_*` pulses and manually driven `reg_sel`, `pin_sel`, and `shift_dir`, without needing the instruction decoder. Unit-test the register bank separately first. Include `MOV_IMM` and `MOV_REG` in your writeback mux, although your assigned ISA theme is SHIFT_IN/SHIFT_OUT. Do not modify the controller FSM or comparator flag.
 

@@ -5,7 +5,7 @@
 **Previous milestone:** `README_WAIT_WAIT_C_microarchitecture.md`  
 **Processor:** 8-bit byte-addressed PC, 256 × 8 instruction memory, non-pipelined multicycle execution, R0/R1 (8 bits)
 
-> **Important:** This document retains the *existing* ISA and instruction-retirement convention. It does not redefine the already-implemented PC, IR/IMM, register file, or WAIT timer. In the evolving RTL repository, keep the existing file/module names (e.g. `pc.sv`, `pc_write_en`), rather than creating duplicate state solely to match names in this proposal. Interface names below are a **proposed integration contract** to agree on before parallel coding.
+> **Important:** This document retains the *existing* ISA and instruction-retirement convention. It does not redefine the already-implemented PC, IR/IMM, register file, or WAIT timer. In the evolving RTL repository, keep the existing file/module names (e.g. `pc.sv`, `pc_sel`), rather than creating duplicate state solely to match names in this proposal. Interface names below are a **proposed integration contract** to agree on before parallel coding.
 
 ## 1. Goal and division of responsibility
 
@@ -40,7 +40,7 @@ The prior WAIT milestone established:
 5. A blocking instruction can remain in `EXECUTE` for extra clocks. Its side effects must occur **once**, on successful completion; PC must hold while blocked.
 6. Preserve the existing `WAIT_REMAIN` state for timer waits; `WAIT_PIN` and `DATA_IO` can extend `EXECUTE` without borrowing the timer's countdown.
 
-**PC sources:** ordinary fall-through `PC + instruction_length`; taken `PIN_CTRL` branch or active `LOOP` repetition uses `IMM[7:0]` (absolute **byte** address). Keep one PC register and a single write enable (`pc_write_en` if that is the current repository name). No speculative fetch, flush or branch prediction is required.
+**PC sources:** ordinary fall-through `PC + instruction_length`; taken `PIN_CTRL` branch or active `LOOP` repetition will use `IMM[7:0]` (absolute **byte** address). Keep one PC register. The current controller selects hold, +1, or +2 using `pc_sel`; a future target-load selection is needed for branches/LOOP. No speculative fetch, flush or branch prediction is required.
 
 ### Two-byte predecode (from the ISA)
 
@@ -391,19 +391,22 @@ An actual taped-out chip requires a **physical host interface**; a testbench-sup
 
 ### 6.1 Existing sequencer → shared PC
 
-Use the current `pc.sv` + `pc_write_en` (or repository equivalent):
+Use the separate `pc.sv` module with its Step 7 `pc_sel` interface:
 
 ```systemverilog
-// Combinational decisions stable throughout final EXECUTE cycle.
-logic        retire;
-logic        pc_write_en;
-logic [7:0]  pc_next;
+// Controller output: PC_HOLD except when a supported instruction completes.
+logic [1:0] pc_sel;
+logic [7:0] pc_value;
 
-assign pc_write_en = retire; // if current PC module uses this convention
-// pc_next chooses: PC+1, PC+2, or IMM (branch/loop target)
+pc u_pc (
+    .clk    (clk),
+    .reset  (rst),
+    .pc_sel (pc_sel),
+    .pc     (pc_value)
+);
 ```
 
-If your PC unit currently accepts distinct increment/jump controls, adapt these signals **without creating another PC register**. Person A owns this integration.
+The controller reads `pc_value` and selects `PC_PLUS_1` or `PC_PLUS_2` only on the final execution cycle. The PC block owns address arithmetic and storage; the controller contains no PC register. Selector `2'b11` is reserved and currently holds. Branch/LOOP implementation will require a target-load selection and an 8-bit target input; neither is implemented in Step 7. Person A owns this integration.
 
 ### 6.2 Sequencer ↔ mailboxes (proposed stable contract)
 

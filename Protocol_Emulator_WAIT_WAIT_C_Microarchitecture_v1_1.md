@@ -7,6 +7,8 @@
 
 > **Compatibility note — read first:** The ISA specifies that `WAIT D` spends **exactly D cycles in execution**, including its first `EXECUTE` cycle, and that the PC updates **when the instruction retires**. An earlier architecture discussion instead counted D additional `WAIT` cycles after `EXECUTE` and incremented the PC during fetch. **This README deliberately follows the uploaded ISA.** Thus a one-byte `WAIT D` takes **1 + D total cycles**, not `2 + D`; the PC does **not** advance during either fetch state.
 
+> **Person A Step 7 interface update:** Current RTL keeps `control_unit` and `pc` as separate modules. The controller reads `pc_value` and drives `pc_sel`; the PC module owns the register and increment selection. `PC_HOLD=00`, `PC_PLUS_1=01`, and `PC_PLUS_2=10` are defined in `isa_pkg`; `11` is reserved and currently holds. This supersedes the earlier PC ownership/port examples below. Retirement means instruction completion; no separate `retire` signal or execution state is required.
+
 ---
 
 ## 1. Objectives and non-goals
@@ -398,8 +400,8 @@ This example is for an **uninterrupted, non-pipelined execution path**. Future b
 
 For milestone 1, use a **preloaded, combinational-read ROM model**:
 
-- `instr_addr` drives the current fetch address (`pc` for the opcode, `pc + 1` for the operand).
-- `instr_data` is valid combinationally early enough to be sampled at the fetch edge.
+- `inst_addr` drives the current fetch address (`pc` for the opcode, `pc + 1` for the operand).
+- `inst` is valid combinationally early enough to be sampled at the fetch edge.
 - No instruction memory writes are needed for this milestone.
 
 A synchronous-read SRAM can have different address-to-data latency, so the fetch FSM and address timing must be revisited if the memory is changed. **Do not assume this exact two-/three-cycle implementation works unchanged with every SRAM macro.** The final taped-out processor also needs a program-loading path; `$readmemh` is only for simulation.
@@ -466,15 +468,15 @@ Person A will have more control-logic work; Person B compensates by owning the f
 module protocol_core (
     input  logic       clk,
     input  logic       rst,
-    input  logic [7:0] instr_data,
-    output logic [7:0] instr_addr
+    input  logic [7:0] inst,
+    output logic [7:0] inst_addr
 );
 ```
 
 - `clk`: one system clock. All sequential updates occur at the rising edge.
 - `rst`: **synchronous active-high** reset; held through a rising edge to reset state. Reset takes precedence over writes/decrements.
-- `instr_addr`: combinational instruction-memory read address, determined by Person A.
-- `instr_data`: corresponding combinational 8-bit instruction-memory output supplied externally (by the testbench ROM for now).
+- `inst_addr`: combinational instruction-memory read address, determined by Person A.
+- `inst`: corresponding combinational 8-bit instruction-memory output supplied externally (by the testbench ROM for now).
 - There is **no ready/valid/latency signal** on this version of the memory port. It assumes a combinational-read ROM; replacing it with synchronous SRAM requires a new agreement and fetch-timing change.
 
 `protocol_core` consists only of `instruction_control` instance `u_control`, `wait_timer` instance `u_timer`, and named port connections. Do **not** add a second PC, register copy, delay counter, or independent FSM in the top-level.
@@ -487,8 +489,8 @@ This is the port declaration to implement; it is **not** a complete RTL implemen
 module instruction_control (
     input  logic        clk,
     input  logic        rst,
-    input  logic [7:0]  instr_data,
-    output logic [7:0]  instr_addr,
+    input  logic [7:0]  inst,
+    output logic [7:0]  inst_addr,
 
     // Commands to B's wait_timer (combinational control signals).
     output logic        wait_c_write,
@@ -507,7 +509,7 @@ module instruction_control (
     output logic [7:0]  imm,
     output logic [1:0]  state,
     output logic        retire,
-    output logic        illegal_instr
+    output logic        illegal_inst
 );
 ```
 
@@ -517,7 +519,7 @@ module instruction_control (
 
 | Signal | Driven by A | Exact semantics |
 |---|---|---|
-| `instr_addr[7:0]` | Fetch address mux | `pc` in `FETCH_OPCODE`, `(pc + 8'd1)` in `FETCH_OPERAND`; in all other states output `pc` (address is ignored) |
+| `inst_addr[7:0]` | Fetch address mux | `pc` in `FETCH_OPCODE`, `(pc + 8'd1)` in `FETCH_OPERAND`; in all other states output `pc` (address is ignored) |
 | `wait_c_write` | Execute decoder | **Level-high for the one `EXECUTE` cycle** of a valid `WAIT_C` (`IR[7:5]=000`, `{ir[4:0],imm} != 0`); B writes T on its ending edge |
 | `t_write_data[12:0]` | Concatenation | Always `{ir[4:0], imm[7:0]}`; used only if `wait_c_write=1` |
 | `wait_start` | Execute decoder | **Level-high for the first execution cycle** of a legal WAIT FULL/HALF/QUARTER, including D=1; B loads `wait_remaining <- D-1` on the ending edge |
@@ -528,7 +530,7 @@ module instruction_control (
 | `imm[7:0]` | Registered immediate byte | Loaded at end of `FETCH_OPERAND`, holds otherwise |
 | `state[1:0]` | Registered FSM | Encodings frozen below |
 | `retire` | Combinational verification pulse | High **during the cycle that ends with instruction retirement**; sampled on its final rising edge, not a sticky done bit |
-| `illegal_instr` | Combinational fault indicator | High while `EXECUTE` sees an unsupported/reserved/illegal instruction; execution holds and no architectural write/retire occurs; testbench must `$fatal` |
+| `illegal_inst` | Combinational fault indicator | High while `EXECUTE` sees an unsupported/reserved/illegal instruction; execution holds and no architectural write/retire occurs; testbench must `$fatal` |
 
 ### 12.3 Person B's module: `wait_timer`
 
@@ -589,23 +591,23 @@ This is the section both people must implement **literally**. Commands and statu
 
 | Pre-edge state/opcode | A's outputs high before edge | B's relevant pre-edge status | What happens **at** edge | A's next state |
 |---|---|---|---|---|
-| `FETCH_OPCODE` | none | ignored | A loads `ir <- instr_data`; PC holds | `FETCH_OPERAND` if current `instr_data` decodes two-byte, else `EXECUTE` |
-| `FETCH_OPERAND` | none | ignored | A loads `imm <- instr_data`; PC holds | `EXECUTE` |
+| `FETCH_OPCODE` | none | ignored | A loads `ir <- inst`; PC holds | `FETCH_OPERAND` if current `inst` decodes two-byte, else `EXECUTE` |
+| `FETCH_OPERAND` | none | ignored | A loads `imm <- inst`; PC holds | `EXECUTE` |
 | `EXECUTE`, legal `WAIT_C` | `wait_c_write`, `retire` | ignored | B loads T; A increments PC by 2 | `FETCH_OPCODE` |
 | `EXECUTE`, legal WAIT, D=1 | `wait_start`, `retire` | `wait_is_single_cycle=1` | B loads 0; A increments PC by 1 | `FETCH_OPCODE` |
 | `EXECUTE`, legal WAIT, D>1 | `wait_start` | `wait_is_single_cycle=0` | B loads D−1; A holds PC | `WAIT_REMAIN` |
 | `WAIT_REMAIN`, count>1 | `wait_tick` | `wait_is_last_cycle=0` | B decrements count; A holds PC | `WAIT_REMAIN` |
 | `WAIT_REMAIN`, count=1 | `wait_tick`, `retire` | `wait_is_last_cycle=1` | B decrements 1→0; A increments PC by 1 | `FETCH_OPCODE` |
-| `EXECUTE`, invalid/unsupported | `illegal_instr` | ignored | No T/counter/PC writes; no retirement | Hold in `EXECUTE` until testbench terminates |
-| Any state with `rst=1` | A gates `wait_c_write`, `wait_start`, `wait_tick`, `retire`, and `illegal_instr` low | ignored | Both modules synchronously reset their registers | `FETCH_OPCODE` |
+| `EXECUTE`, invalid/unsupported | `illegal_inst` | ignored | No T/counter/PC writes; no retirement | Hold in `EXECUTE` until testbench terminates |
+| Any state with `rst=1` | A gates `wait_c_write`, `wait_start`, `wait_tick`, `retire`, and `illegal_inst` low | ignored | Both modules synchronously reset their registers | `FETCH_OPCODE` |
 
-**Fetch length predecode:** At the end of `FETCH_OPCODE`, determine 1 vs. 2 bytes from **current `instr_data`**, not from old registered `ir`. Otherwise a two-byte instruction could enter the wrong state. For future-proofing implement the ISA-defined two-byte classifier (WAIT_C; branching PIN_CTRL; LOOP; immediate MOVE/CMP), while marking all non-milestone instructions *unsupported at EXECUTE*.
+**Fetch length predecode:** At the end of `FETCH_OPCODE`, determine 1 vs. 2 bytes from **current `inst`**, not from old registered `ir`. Otherwise a two-byte instruction could enter the wrong state. For future-proofing implement the ISA-defined two-byte classifier (WAIT_C; branching PIN_CTRL; LOOP; immediate MOVE/CMP), while marking all non-milestone instructions *unsupported at EXECUTE*.
 
 **Legal WAIT decode:** `ir[7:5]==3'b001`, `ir[4:3]` in `00`,`01`,`10`, and `ir[2:0]==3'b000`. `SET_DIR` (`sub_mode=11`) is **not a WAIT**, and is intentionally unsupported this milestone. Illegal or unsupported bytes must never trigger `wait_start` or `wait_c_write`.
 
-**Legal WAIT_C decode:** `ir[7:5]==3'b000` **and** `{ir[4:0],imm} != 13'd0`. Zero is ISA-illegal; expose `illegal_instr` rather than writing T=0. `wait_c_write` is active only on the valid instruction's final EXECUTE cycle.
+**Legal WAIT_C decode:** `ir[7:5]==3'b000` **and** `{ir[4:0],imm} != 13'd0`. Zero is ISA-illegal; expose `illegal_inst` rather than writing T=0. `wait_c_write` is active only on the valid instruction's final EXECUTE cycle.
 
-**PC update:** No increment in either fetch state; `instr_addr=pc+1` in `FETCH_OPERAND` is only a combinational address selection. PC increments by `8'd1` for retiring WAIT and by `8'd2` for retiring WAIT_C. The PC must remain stable for the entire active wait, including all `WAIT_REMAIN` cycles.
+**PC update:** No increment in either fetch state; `inst_addr=pc+1` in `FETCH_OPERAND` is only a combinational address selection. PC increments by `8'd1` for retiring WAIT and by `8'd2` for retiring WAIT_C. The PC must remain stable for the entire active wait, including all `WAIT_REMAIN` cycles.
 
 ### Control invariants (integration assertions)
 
@@ -616,7 +618,7 @@ This is the section both people must implement **literally**. Commands and statu
 5. `retire` is asserted **once** per legal instruction, on its final execution cycle, and implies PC changes on the completing edge.
 6. `t_reg` changes only on a reset or valid `wait_c_write` edge, and never as a side effect of WAIT.
 7. A completed WAIT leaves `wait_remaining=0` and advances PC by **exactly one**.
-8. On an illegal/unsupported instruction, `illegal_instr=1`, `retire=0`, neither timer command fires, and the testbench reports an error.
+8. On an illegal/unsupported instruction, `illegal_inst=1`, `retire=0`, neither timer command fires, and the testbench reports an error.
 9. When `rst=1` at a rising edge, neither a concurrent retirement nor a timer command overrides the reset values.
 10. No combinational feedback path from a controller command to a timer status flag and back to the same command. Status may affect `retire`/next state, but **not** generate `wait_start` or `wait_tick`.
 
@@ -627,11 +629,11 @@ This is the section both people must implement **literally**. Commands and statu
 ### Person A: control/frontend deliverables
 
 1. Implement `instruction_control.sv` using the frozen port list in §12.2. Use separate combinational next-state/output decode and synchronous state/register updates, or a clearly equivalent coding style. **Do not** write the timer datapath.
-2. Implement `instr_addr` mux (`pc` or `pc+1`) and latch `ir` and `imm` only in their fetch states. `pc` holds until an instruction retires.
-3. Implement the 1/2-byte length classifier using the *currently fetched `instr_data`*. Do not classify the instruction length using stale `ir` in `FETCH_OPCODE`.
+2. Implement `inst_addr` mux (`pc` or `pc+1`) and latch `ir` and `imm` only in their fetch states. `pc` holds until an instruction retires.
+3. Implement the 1/2-byte length classifier using the *currently fetched `inst`*. Do not classify the instruction length using stale `ir` in `FETCH_OPCODE`.
 4. Implement legal WAIT/WAIT_C detection, `wait_c_write`, `t_write_data`, `wait_start`, `wait_mode`, `wait_tick`, and `retire` exactly per §13.
 5. Let `wait_is_single_cycle` control the transition from WAIT EXECUTE to either immediate retirement or `WAIT_REMAIN`. Let `wait_is_last_cycle` control terminal retirement from `WAIT_REMAIN`.
-6. Implement an `illegal_instr` indication on unsupported/reserved instructions, invalid WAIT arguments, `SET_DIR`, and WAIT_C=0; **do not** count them as NOPs.
+6. Implement an `illegal_inst` indication on unsupported/reserved instructions, invalid WAIT arguments, `SET_DIR`, and WAIT_C=0; **do not** count them as NOPs.
 7. Implement `protocol_core.sv` as thin named-port instantiations of A's control and B's timer. It can exist before B's code is present, but full integration compilation requires both modules.
 8. Implement `tb/instruction_rom.sv` with a **combinational** 256×8 array read and a simulation-only initialization from a provided `.hex` file. Ensure the program path is relative to repository root or explicitly configurable.
 9. Implement `tb_instruction_control.sv` with a **stubbed/fake timer response**; exercise both D=1 (`wait_is_single_cycle=1`) and D>1 (`wait_is_single_cycle=0`, later `wait_is_last_cycle=1`) paths. Drive status signals deterministically—never leave these inputs X or floating.
@@ -671,7 +673,7 @@ The goal is independent changes with minimal merge conflicts and a reproducible 
 
 1. Put **this README** on the default branch (`main`), and treat §§11–13 as the interface contract.
 2. Create the directory layout from §11 (empty directories require placeholder files in Git, or may be created when the first real files are committed).
-3. Agree that `instruction_control`, `wait_timer`, and `protocol_core` use **exactly** the module/port names of §12. Agree to keep top-level `instr_addr/instr_data` outside the core.
+3. Agree that `instruction_control`, `wait_timer`, and `protocol_core` use **exactly** the module/port names of §12. Agree to keep top-level `inst_addr/inst` outside the core.
 4. Choose one simulator for the first round (e.g., Icarus Verilog with `-g2012`, or Verilator). Note the exact command/tool version in PRs so both run the same tests.
 5. Avoid committing generated simulation files (`*.vvp`, `*.vcd`, `obj_dir/`, build logs) unless explicitly needed for a review; put them in `.gitignore`.
 
@@ -713,7 +715,7 @@ git push -u origin feat/wait-timer
 3. Compile `instruction_control.sv`, `wait_timer.sv`, `protocol_core.sv`, the test ROM, and `tb_wait_integration.sv` together. Verify there are **no unresolved modules, extra drivers, implicit nets, or width warnings**.
 4. Run `wait_smoke.hex`; verify T=434, all PC transitions, counter behavior, and final PC=0x05 after exactly 765 post-reset instruction edges.
 5. Run the boundary/reconfiguration/reset/illegal regression suite. If it fails, create an integration-fix branch/PR; fix the owning source module, not the other person's copy of the logic.
-6. Capture a single waveform showing `pc`, `state`, `ir`, `imm`, `t_reg`, `wait_duration`, `wait_remaining`, all timer control strobes, `retire`, and `illegal_instr`.
+6. Capture a single waveform showing `pc`, `state`, `ir`, `imm`, `t_reg`, `wait_duration`, `wait_remaining`, all timer control strobes, `retire`, and `illegal_inst`.
 7. Mark the v1 milestone complete only after both review the waveform and regression results; then tag the passing commit if useful (`wait-v1-rtl`).
 
 ### Example simulator commands from repository root
@@ -750,7 +752,7 @@ If using Verilator instead, establish equivalent commands together. The ROM shou
 - [ ] Control strobes and status flags are **combinational levels in the indicated cycle**, not pulses generated a cycle later.
 - [ ] Exact §12 port names/widths/encodings; no unsolicited interface changes.
 - [ ] No independent WAIT FSM in timer, no duplicate wait counter in controller.
-- [ ] Reserved instructions are signaled via `illegal_instr`, not treated as working operations.
+- [ ] Reserved instructions are signaled via `illegal_inst`, not treated as working operations.
 - [ ] Each person owns separate files and tests on a separate branch; integration occurs through reviewed PRs.
 
 ### What to bring to the reunion
@@ -774,10 +776,10 @@ The tests in §18 validate the complete subsystem. The following tests specifica
 1. **D=1 same-edge test:** With T=1 and WAIT FULL, assert that `wait_start=1`, `wait_is_single_cycle=1`, `retire=1` **before the same EXECUTE edge**. Immediately after that edge, `PC` increased by 1, state became `FETCH_OPCODE`, and remaining counter is 0.
 2. **D=4 handoff test:** At WAIT EXECUTE with T=4, A asserts `wait_start=1`, B reports `wait_is_single_cycle=0`; immediately after the edge, state=`WAIT_REMAIN`, remaining=3, PC unchanged. Three `wait_tick` edges later, remaining=0 and PC increments exactly once.
 3. **T write same-edge test:** On `WAIT_C 434` retirement, `wait_c_write=1`, `retire=1` before edge; immediately afterward T=434 and PC increments by 2. WAIT in the following opcode sees **new** T.
-4. **Two-byte fetch test:** In FETCH_OPCODE `instr_data=0x01` causes next state FETCH_OPERAND. Fetching `0xB2` at `(pc+1)` does not overwrite `ir`; PC stays 0 until WAIT_C retirement.
+4. **Two-byte fetch test:** In FETCH_OPCODE `inst=0x01` causes next state FETCH_OPERAND. Fetching `0xB2` at `(pc+1)` does not overwrite `ir`; PC stays 0 until WAIT_C retirement.
 5. **Boundary WAIT tests:** D=1 for HALF/QUARTER when T is small; no extra WAIT_REMAIN cycle, no underflow. With T=8191 FULL, there are exactly 8190 WAIT_REMAIN ticks after the first EXECUTE edge.
 6. **Reset race test:** Assert `rst=1` so it overlaps `wait_tick` or `wait_c_write` at a rising edge. Both modules reset, and no command's write overrides reset.
-7. **Illegal instruction test:** An illegal WAIT operand or `WAIT_C 0` reaches EXECUTE, raises `illegal_instr`, and does not mutate T, remaining, or PC. Scoreboard aborts rather than hanging silently.
+7. **Illegal instruction test:** An illegal WAIT operand or `WAIT_C 0` reaches EXECUTE, raises `illegal_inst`, and does not mutate T, remaining, or PC. Scoreboard aborts rather than hanging silently.
 8. **No double-retirement test:** Each command pulse can cause at most one retirement per instruction; confirm no next opcode fetch occurs while the WAIT counter is active.
 
 **Timing measurement rule for tests:** `retire` and status signals are evaluated in the **pre-edge** cycle. Registered `pc`, `state`, `t_reg`, and `wait_remaining` change **after** the rising edge (nonblocking assignment update). A testbench should avoid racing the DUT by sampling post-edge values with a clocking block, a later read-only simulation phase, or a small testbench-only delay. Do not introduce physical RTL delays to make tests pass.
@@ -815,7 +817,7 @@ The tests in §18 validate the complete subsystem. The following tests specifica
 - [ ] Assert that an instruction never retires twice.
 - [ ] Flag illegal/reserved instruction encodings rather than silently treating them as legal.
 
-**Waveform signals to inspect:** `clk`, `rst`, `pc`, `instr_addr`, `instr_data`, `ir`, `imm`, `state`, `t_reg`, `D`, `wait_remaining`, `wait_c_write`, `wait_start`, `wait_tick`, `retire`, `illegal_instr`.
+**Waveform signals to inspect:** `clk`, `rst`, `pc`, `inst_addr`, `inst`, `ir`, `imm`, `state`, `t_reg`, `D`, `wait_remaining`, `wait_c_write`, `wait_start`, `wait_tick`, `retire`, `illegal_inst`.
 
 ---
 

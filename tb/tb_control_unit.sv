@@ -1,7 +1,8 @@
-//CHAT MADE THIS
+// Multi-instruction WAIT regression using the legacy fake timer interface.
 `timescale 1ns/1ps
 
 module tb_control_unit;
+    import isa_pkg::*;
 
     logic [7:0] inst;
     logic       clk;
@@ -11,10 +12,11 @@ module tb_control_unit;
     logic       wait_start;
     logic       wait_config_U;
     logic       wait_config_L;
-    logic       PC_update;
+    logic [1:0] pc_sel;
 
     //program counter and instruction memory
-    logic [7:0] PC;
+    logic [7:0] pc;
+    logic [7:0] inst_addr;
     logic [7:0] memory [0:255];
 
     //fake WAIT timer
@@ -29,10 +31,13 @@ module tb_control_unit;
     integer wait_count;
     integer config_count;
     integer expected_duration;
+    integer completed_count;
+    integer active_cycles;
 
     //control unit
     control_unit dut (
         .inst(inst),
+        .pc_value(pc),
         .clk(clk),
         .reset(reset),
         .wait_done(wait_done),
@@ -40,7 +45,9 @@ module tb_control_unit;
         .wait_start(wait_start),
         .wait_config_U(wait_config_U),
         .wait_config_L(wait_config_L),
-        .PC_update(PC_update)
+        .pc_sel(pc_sel),
+        .inst_addr(inst_addr),
+        .direction()
     );
 
     //clock
@@ -64,16 +71,16 @@ module tb_control_unit;
         memory[7] = 8'h20; //WAIT FULL
     end
 
-    //read instruction from PC
-    assign inst = memory[PC];
+    //combinational instruction-memory read
+    assign inst = memory[inst_addr];
 
-    //program counter
-    always_ff @(posedge clk) begin
-        if(reset == 1)
-            PC <= 0;
-        else if(PC_update == 1)
-            PC <= PC + 1;
-    end
+    // Separate PC block owns increment selection and storage.
+    pc u_pc (
+        .clk         (clk),
+        .reset       (reset),
+        .pc_sel      (pc_sel),
+        .pc          (pc)
+    );
 
     //fake timer duration calculation
     always_comb begin
@@ -108,7 +115,7 @@ module tb_control_unit;
                 T <= {config_U, inst[7:0]};
 
             //capture WAIT mode during FETCH
-            if(dut.state == 3'd1 &&
+            if(dut.state == dut.FETCH &&
                inst[7:5] == 3'b001)
                 wait_mode <= inst[4:3];
 
@@ -132,30 +139,60 @@ module tb_control_unit;
         end
     end
 
-    //fake timer completion
-    always_comb begin
-        wait_done = 0;
+    // Completion status is independent of wait_start to avoid combinational
+    // feedback between the fake timer and the controller.
+    assign wait_done = ((dut.state == dut.EXECUTE) && (wait_duration == 13'd1)) ||
+                       (busy && (wait_remaining == 13'd1));
 
-        if(wait_start == 1 && wait_duration == 1)
-            wait_done = 1;
-        else if(busy == 1 && wait_remaining == 1)
-            wait_done = 1;
+    // Check the program's literal completion addresses and exact total latency.
+    // Inspect PC after nonblocking register updates have taken effect.
+    always @(posedge clk) begin : check_pc_completion
+        logic [7:0] expected_pc;
+        logic [1:0] expected_sel;
+        if (reset) begin
+            expected_pc = 0;
+            completed_count = 0;
+            active_cycles = 0;
+        end
+        else begin
+            active_cycles++;
+            expected_pc = pc;
+            if (pc_sel != PC_HOLD) begin
+                case (completed_count)
+                    0: begin expected_pc = 2; expected_sel = PC_PLUS_2; end
+                    1: begin expected_pc = 3; expected_sel = PC_PLUS_1; end
+                    2: begin expected_pc = 4; expected_sel = PC_PLUS_1; end
+                    3: begin expected_pc = 5; expected_sel = PC_PLUS_1; end
+                    4: begin expected_pc = 7; expected_sel = PC_PLUS_2; end
+                    5: begin expected_pc = 8; expected_sel = PC_PLUS_1; end
+                    default: $fatal(1, "FAIL: extra instruction completion");
+                endcase
+                if (pc_sel !== expected_sel)
+                    $fatal(1, "FAIL: wrong PC increment for instruction");
+                if ((dut.state == dut.WAIT_REMAIN || wait_start) && !wait_done)
+                    $fatal(1, "FAIL: PC advanced before WAIT completed");
+                completed_count++;
+            end
+        end
+        #1;
+        if (pc !== expected_pc)
+            $fatal(1, "FAIL: PC=%0d expected=%0d", pc, expected_pc);
     end
 
     //check control signals
     always @(posedge clk) begin
         if(reset == 0) begin
 
-            //PC should only update during fetch
-            if(PC_update == 1 &&
-               dut.state != 3'd1 &&
-               dut.state != 3'd2)
-                $fatal(1, "FAIL: PC updated outside FETCH");
+            // Fetching changes the memory address, never the architectural PC.
+            if(pc_sel != PC_HOLD &&
+               (dut.state == dut.FETCH ||
+                dut.state == dut.FETCH_OPERAND))
+                $fatal(1, "FAIL: PC updated during fetch");
 
             //timer should only start during execute
             if(wait_start == 1) begin
 
-                if(dut.state != 3'd3)
+                if(dut.state != dut.EXECUTE)
                     $fatal(1, "FAIL: WAIT started outside EXECUTE");
 
                 case(wait_count)
@@ -177,7 +214,7 @@ module tb_control_unit;
 
             //check upper configuration
             if(wait_config_U == 1) begin
-                if(dut.state != 3'd1)
+                if(dut.state != dut.FETCH)
                     $fatal(1, "FAIL: upper config outside FETCH");
 
                 $display("PASS: WAIT_C upper byte");
@@ -185,8 +222,8 @@ module tb_control_unit;
 
             //check lower configuration
             if(wait_config_L == 1) begin
-                if(dut.state != 3'd2)
-                    $fatal(1, "FAIL: lower config outside FETCH_BYTE_2");
+                if(dut.state != dut.FETCH_OPERAND)
+                    $fatal(1, "FAIL: lower config outside FETCH_OPERAND");
 
                 config_count = config_count + 1;
 
@@ -210,12 +247,15 @@ module tb_control_unit;
         reset = 0;
 
         //finish after final WAIT completes
-        wait(PC == 8 && dut.state == 3'd1);
+        wait(pc == 8 && dut.state == dut.FETCH);
 
         #1;
 
         if(wait_count != 4)
             $fatal(1, "FAIL: expected 4 WAIT instructions");
+
+        if(completed_count != 6 || active_cycles != 25)
+            $fatal(1, "FAIL: expected 6 completions in exactly 25 active cycles");
 
         if(config_count != 2)
             $fatal(1, "FAIL: expected 2 WAIT_C instructions");
@@ -230,7 +270,7 @@ module tb_control_unit;
         $display("ALL TESTS PASSED");
         $display("WAIT instructions: %0d", wait_count);
         $display("WAIT_C instructions: %0d", config_count);
-        $display("Final PC: %0d", PC);
+        $display("Final PC: %0d", pc);
 
         $finish;
     end
