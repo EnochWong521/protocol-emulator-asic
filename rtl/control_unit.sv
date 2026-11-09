@@ -1,18 +1,19 @@
 module control_unit (
     input   logic [7:0]   inst,
-    input   logic [7:0]   pc_value,
+    input   logic [7:0]   ir,
+    input   logic         wait_c_nonzero,
     input   logic         clk,
     input   logic         reset,
     input   logic         wait_is_single_cycle,
     input   logic         wait_is_last_cycle,
 
+    output  logic         ir_load,
+    output  logic         imm_load,
     output  logic         wait_start,
     output  logic         wait_c_write,
-    output  logic [12:0]  t_write_data,
     output  logic [1:0]   wait_mode,
     output  logic         wait_tick,
     output  logic [1:0]   pc_sel,
-    output  logic [7:0]   inst_addr,
     output  logic         direction,
     output  logic         exec_shift_in,
     output  logic         exec_shift_out,
@@ -31,8 +32,6 @@ module control_unit (
     } state_t;
 
     state_t state, next_state;
-    logic [INST_WIDTH-1:0] ir;
-    logic [INST_WIDTH-1:0] imm;
     logic inst_two_byte;
 
     // Length predecode uses the current fetch byte, independently of legality.
@@ -55,11 +54,8 @@ module control_unit (
         endcase
     end
 
-    assign inst_addr = (state == FETCH_OPERAND)
-                      ? pc_value + PC_WIDTH'(ONE_BYTE)
-                      : pc_value;
-
-    assign t_write_data = {ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm};
+    assign ir_load = !reset && (state == FETCH);
+    assign imm_load = !reset && (state == FETCH_OPERAND);
     assign wait_mode = ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB];
 
     // SHIFT_IN and SHIFT_OUT share register/pin field positions.
@@ -70,20 +66,10 @@ module control_unit (
     always_ff @(posedge clk) begin
         if (reset == 1) begin
             state <= FETCH;
-            ir <= '0;
-            imm <= '0;
             direction <= DIR_RIGHT;
         end
         else begin
             state <= next_state;
-            // Capture the first byte, or the optional second byte.
-            if(state == FETCH) begin
-                ir <= inst;
-            end
-            else if(state == FETCH_OPERAND) begin
-                imm <= inst;
-            end
-
             // Register the direction only for a legal SET_DIR.
             if(state == EXECUTE &&
                ir[OPCODE_MSB:OPCODE_LSB] == OP_WAIT &&
@@ -122,7 +108,7 @@ module control_unit (
 
                     //WAIT_C
                     if(ir[OPCODE_MSB:OPCODE_LSB] == OP_WAIT_C) begin
-                        if (t_write_data != '0) begin
+                        if (wait_c_nonzero) begin
                             wait_c_write = 1'b1;
                             pc_sel = PC_PLUS_2;
                             next_state = FETCH;

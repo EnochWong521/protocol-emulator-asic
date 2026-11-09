@@ -1,7 +1,8 @@
 // Controller/PC integration: atomic WAIT_C writes and exact WAIT cycle timing.
 // Run from the repository root:
 // iverilog -g2012 -s tb_control_unit -o /tmp/tb_control_unit.vvp \
-//   rtl/isa_pkg.sv rtl/pc.sv rtl/wait_timer.sv rtl/control_unit.sv tb/tb_control_unit.sv
+//   rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/wait_timer.sv \
+//   rtl/control_unit.sv tb/tb_control_unit.sv
 // vvp /tmp/tb_control_unit.vvp
 `timescale 1ns/1ps
 
@@ -9,6 +10,8 @@ module tb_control_unit;
     import isa_pkg::*;
 
     logic [7:0] inst;
+    logic [INST_WIDTH-1:0] ir, imm;
+    logic       ir_load, imm_load;
     logic       clk;
     logic       reset;
     logic       wait_is_single_cycle;
@@ -18,6 +21,7 @@ module tb_control_unit;
     logic       wait_c_write;
     logic       wait_tick;
     logic [T_WIDTH-1:0] t_write_data;
+    logic       wait_c_nonzero;
     logic [1:0] wait_mode;
     logic [1:0] pc_sel;
     logic       direction;
@@ -45,19 +49,20 @@ module tb_control_unit;
     //control unit
     control_unit dut (
         .inst(inst),
-        .pc_value(pc),
+        .ir(ir),
+        .wait_c_nonzero(wait_c_nonzero),
         .clk(clk),
         .reset(reset),
         .wait_is_single_cycle(wait_is_single_cycle),
         .wait_is_last_cycle(wait_is_last_cycle),
 
+        .ir_load(ir_load),
+        .imm_load(imm_load),
         .wait_start(wait_start),
         .wait_c_write(wait_c_write),
-        .t_write_data(t_write_data),
         .wait_mode(wait_mode),
         .wait_tick(wait_tick),
         .pc_sel(pc_sel),
-        .inst_addr(inst_addr),
         .direction(direction),
         .exec_shift_in(),
         .exec_shift_out(),
@@ -153,13 +158,13 @@ module tb_control_unit;
                 timer.wait_remaining !== '0)
                 $fatal(1, "FAIL: WAIT fetch T=%0d mode=%0d", t, mode_index);
             @(posedge clk); #1;
-            if (dut.state !== dut.EXECUTE || pc !== wait_pc || dut.ir !== expected_ir)
+            if (dut.state !== dut.EXECUTE || pc !== wait_pc || ir !== expected_ir)
                 $fatal(1, "FAIL: WAIT fetch added/lost a cycle");
 
             for (int unsigned e = 0; e < duration; e++) begin
                 #1;
-                if (pc !== wait_pc || dut.ir !== expected_ir ||
-                    dut.imm !== t_value[INST_WIDTH-1:0] || timer.t_reg !== t_value ||
+                if (pc !== wait_pc || ir !== expected_ir ||
+                    imm !== t_value[INST_WIDTH-1:0] || timer.t_reg !== t_value ||
                     wait_mode !== mode_index[1:0] || wait_c_write !== 1'b0)
                     $fatal(1, "FAIL: WAIT state changed early T=%0d mode=%0d edge=%0d",
                            t, mode_index, e);
@@ -181,8 +186,8 @@ module tb_control_unit;
                 if (wait_tick) tick_edges++;
                 @(posedge clk); #1;
                 if (timer.wait_remaining !== T_WIDTH'(duration-e-1) ||
-                    timer.t_reg !== t_value || dut.ir !== expected_ir ||
-                    dut.imm !== t_value[INST_WIDTH-1:0])
+                    timer.t_reg !== t_value || ir !== expected_ir ||
+                    imm !== t_value[INST_WIDTH-1:0])
                     $fatal(1, "FAIL: post-edge countdown or retention");
                 if (e == duration-1) begin
                     if (dut.state !== dut.FETCH || pc !== wait_pc + PC_WIDTH'(ONE_BYTE) ||
@@ -210,6 +215,14 @@ module tb_control_unit;
 
     //combinational instruction-memory read
     assign inst = memory[inst_addr];
+    assign t_write_data = {ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm};
+    assign wait_c_nonzero = |t_write_data;
+
+    inst_fetch u_fetch (
+        .clk(clk), .reset(reset), .pc_value(pc), .inst(inst),
+        .ir_load(ir_load), .imm_load(imm_load),
+        .inst_addr(inst_addr), .ir(ir), .imm(imm)
+    );
 
     // Separate PC block owns increment selection and storage.
     pc u_pc (
@@ -230,6 +243,9 @@ module tb_control_unit;
     // Check the full T register on every edge, including both fetch states.
     always @(posedge clk) begin : check_timer_interface
         logic [T_WIDTH-1:0] expected_t;
+        if (ir_load !== (!reset && dut.state == dut.FETCH) ||
+            imm_load !== (!reset && dut.state == dut.FETCH_OPERAND))
+            $fatal(1, "FAIL: instruction capture enables incorrect");
         expected_t = timer.t_reg;
         if (reset) begin
             expected_t = T_RESET_VALUE;
@@ -241,15 +257,15 @@ module tb_control_unit;
                 $fatal(1, "FAIL: concurrent timer commands");
             if (wait_c_write) begin
                 if (dut.state !== dut.EXECUTE ||
-                    dut.ir[OPCODE_MSB:OPCODE_LSB] !== OP_WAIT_C || t_write_data === '0)
+                    ir[OPCODE_MSB:OPCODE_LSB] !== OP_WAIT_C || t_write_data === '0)
                     $fatal(1, "FAIL: invalid or premature WAIT_C write");
                 expected_t = t_write_data;
             end
             if (wait_start &&
                 (dut.state !== dut.EXECUTE ||
-                 dut.ir[OPCODE_MSB:OPCODE_LSB] !== OP_WAIT ||
+                 ir[OPCODE_MSB:OPCODE_LSB] !== OP_WAIT ||
                  wait_mode == SET_DIR ||
-                 dut.ir[WAIT_ARG_MSB:WAIT_ARG_LSB] !== WAIT_ARG_REQUIRED))
+                 ir[WAIT_ARG_MSB:WAIT_ARG_LSB] !== WAIT_ARG_REQUIRED))
                 $fatal(1, "FAIL: timer started by a non-WAIT instruction");
             if (wait_tick && (dut.state !== dut.WAIT_REMAIN || timer.wait_remaining === '0))
                 $fatal(1, "FAIL: invalid countdown tick");
@@ -426,9 +442,11 @@ module tb_control_unit;
         run_wait_timing(7,       7,    3,    1);
         run_wait_timing(434,   434,  217,  108);
         run_wait_timing(8191, 8191, 4095, 2047);
-        if (timing_wait_cases != 21 || timing_program_cases != 7)
+        // A zero IMM byte is legal when the upper T bits are nonzero.
+        run_wait_timing(256,   256,  128,   64);
+        if (timing_wait_cases != 24 || timing_program_cases != 8)
             $fatal(1, "FAIL: timing coverage incomplete");
-        $display("ALL TESTS PASSED: 21 WAIT timings, 7 WAIT_C timings, 765-cycle reference");
+        $display("ALL TESTS PASSED: 24 WAIT timings, 8 WAIT_C timings, 765-cycle reference");
         $finish;
     end
 

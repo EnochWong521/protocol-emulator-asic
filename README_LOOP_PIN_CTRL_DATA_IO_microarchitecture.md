@@ -406,7 +406,7 @@ pc u_pc (
 );
 ```
 
-The controller reads `pc_value` and selects `PC_PLUS_1` or `PC_PLUS_2` only on the final execution cycle. The PC block owns address arithmetic and storage; the controller contains no PC register. Selector `2'b11` is reserved and currently holds. Branch/LOOP implementation will require a target-load selection and an 8-bit target input; neither is implemented in Step 7. Person A owns this integration.
+The instruction-fetch block reads `pc_value`, owns the single IR/IMM register pair, and selects the instruction address (PC or PC+1). The controller reads live `inst` for length decoding and saved `ir` for execution, drives `ir_load`/`imm_load`, and selects `PC_PLUS_1` or `PC_PLUS_2` only on the final execution cycle. Integration wiring forwards saved instruction data to the datapaths and provides `wait_c_nonzero=|t_write_data` to the controller for WAIT_C legality. The controller has no IMM data input. The PC block owns PC arithmetic and storage; the controller contains no PC, IR, or IMM registers. Selector `2'b11` is reserved and currently holds. Branch/LOOP implementation will require a target-load selection and an 8-bit target input; neither is implemented in Step 7. Person A owns this integration.
 
 ### 6.2 Sequencer ↔ mailboxes (proposed stable contract)
 

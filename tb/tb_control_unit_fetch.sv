@@ -3,7 +3,7 @@
 // Fetch addressing, lengths, completion updates, timer commands, and SHIFT decode.
 // Run from the repository root:
 // iverilog -g2012 -s tb_control_unit_fetch -o /tmp/tb_control_unit_fetch.vvp \
-//   rtl/isa_pkg.sv rtl/pc.sv rtl/control_unit.sv tb/tb_control_unit_fetch.sv
+//   rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv tb/tb_control_unit_fetch.sv
 // vvp /tmp/tb_control_unit_fetch.vvp
 module tb_control_unit_fetch;
     import isa_pkg::*;
@@ -31,9 +31,12 @@ module tb_control_unit_fetch;
     logic wait_is_last_cycle = 1'b0;
     wire [PC_WIDTH-1:0] pc, inst_addr;
     wire [INST_WIDTH-1:0] inst;
+    wire [INST_WIDTH-1:0] ir, imm;
+    wire ir_load, imm_load;
     wire [1:0] pc_sel;
     wire wait_start, wait_c_write, wait_tick, direction;
     wire [T_WIDTH-1:0] t_write_data;
+    wire wait_c_nonzero;
     wire [1:0] wait_mode;
     wire exec_shift_in, exec_shift_out, reg_sel;
     wire [1:0] pin_sel, shift_out_mode;
@@ -46,18 +49,26 @@ module tb_control_unit_fetch;
 
     always #5 clk = ~clk;
     assign inst = memory[inst_addr];
+    assign t_write_data = {ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm};
+    assign wait_c_nonzero = |t_write_data;
+
+    inst_fetch u_fetch (
+        .clk(clk), .reset(reset), .pc_value(pc), .inst(inst),
+        .ir_load(ir_load), .imm_load(imm_load),
+        .inst_addr(inst_addr), .ir(ir), .imm(imm)
+    );
 
     pc u_pc (
         .clk(clk), .reset(reset), .pc_sel(pc_sel), .pc(pc)
     );
 
     control_unit dut (
-        .clk(clk), .reset(reset), .inst(inst), .pc_value(pc),
-        .inst_addr(inst_addr), .pc_sel(pc_sel),
+        .clk(clk), .reset(reset), .inst(inst), .ir(ir), .wait_c_nonzero(wait_c_nonzero),
+        .ir_load(ir_load), .imm_load(imm_load), .pc_sel(pc_sel),
         .wait_is_single_cycle(wait_is_single_cycle),
         .wait_is_last_cycle(wait_is_last_cycle),
         .wait_start(wait_start), .wait_c_write(wait_c_write),
-        .t_write_data(t_write_data), .wait_mode(wait_mode), .wait_tick(wait_tick),
+        .wait_mode(wait_mode), .wait_tick(wait_tick),
         .direction(direction),
         .exec_shift_in(exec_shift_in), .exec_shift_out(exec_shift_out),
         .reg_sel(reg_sel), .pin_sel(pin_sel), .shift_out_mode(shift_out_mode)
@@ -73,9 +84,10 @@ module tb_control_unit_fetch;
         memory[1] = second_byte;
         @(posedge clk); #1;
         if (pc !== 0 || dut.state !== dut.FETCH ||
-            dut.ir !== 0 || dut.imm !== 0 || direction !== DIR_RIGHT)
+            ir !== 0 || imm !== 0 || direction !== DIR_RIGHT)
             $fatal(1, "reset failed");
         if (pc_sel !== PC_HOLD ||
+            {ir_load, imm_load} !== 2'b00 ||
             {wait_start, wait_c_write, wait_tick, exec_shift_in, exec_shift_out} !== 5'b00000)
             $fatal(1, "control strobe during reset");
         @(negedge clk);
@@ -98,6 +110,9 @@ module tb_control_unit_fetch;
                    dut.state, inst_addr);
         if (pc !== 0 || pc_sel !== expected_sel || wait_start !== expected_start)
             $fatal(1, "PC selection or WAIT start incorrect");
+        if (ir_load !== (before_state == dut.FETCH) ||
+            imm_load !== (before_state == dut.FETCH_OPERAND))
+            $fatal(1, "instruction capture enables incorrect");
         if (wait_c_write !== expected_write || wait_tick !== (before_state == dut.WAIT_REMAIN))
             $fatal(1, "timer write/tick command incorrect");
         if (exec_shift_in !== expected_shift_in || exec_shift_out !== expected_shift_out)
@@ -106,12 +121,12 @@ module tb_control_unit_fetch;
             (reg_sel !== memory[0][4] || pin_sel !== memory[0][3:2] ||
              shift_out_mode !== memory[0][1:0]))
             $fatal(1, "SHIFT register/pin/mode decoding incorrect");
-        expected_ir = (before_state == dut.FETCH) ? memory[expected_addr] : dut.ir;
-        expected_imm = (before_state == dut.FETCH_OPERAND) ? memory[expected_addr] : dut.imm;
+        expected_ir = (before_state == dut.FETCH) ? memory[expected_addr] : ir;
+        expected_imm = (before_state == dut.FETCH_OPERAND) ? memory[expected_addr] : imm;
         @(posedge clk); #1;
         if (dut.state !== after_state || pc !== expected_pc_after)
             $fatal(1, "state transition or PC completion update incorrect");
-        if (dut.ir !== expected_ir || dut.imm !== expected_imm)
+        if (ir !== expected_ir || imm !== expected_imm)
             $fatal(1, "instruction capture/retention incorrect");
         if (after_state == dut.FETCH && {exec_shift_in, exec_shift_out} !== 2'b00)
             $fatal(1, "SHIFT strobe persisted after completion");
@@ -129,14 +144,22 @@ module tb_control_unit_fetch;
         if (t_write_data !== 13'h01A5)
             $fatal(1, "full WAIT_C write data incorrect");
         cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_2, 8'd2, 1);
-        if (dut.ir !== 8'h01 || dut.imm !== 8'hA5)
+        if (ir !== 8'h01 || imm !== 8'hA5)
             $fatal(1, "WAIT_C did not capture adjacent bytes");
+
+        // Check the complete 13-bit candidate, not only the immediate byte.
+        reset_case(8'h01, 8'h00);
+        cycle(dut.FETCH, dut.FETCH_OPERAND, 8'd0, 0);
+        cycle(dut.FETCH_OPERAND, dut.EXECUTE, 8'd1, 0);
+        if (t_write_data !== 13'd256 || wait_c_nonzero !== 1'b1)
+            $fatal(1, "nonzero upper T bits were ignored");
+        cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_2, 8'd2, 1);
 
         // One-byte SET_DIR skips operand fetch and leaves IMM untouched.
         reset_case(8'h39, 8'hFF);
         cycle(dut.FETCH, dut.EXECUTE, 8'd0, 0);
         cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_1, 8'd1);
-        if (direction !== DIR_LEFT || dut.imm !== 0)
+        if (direction !== DIR_LEFT || imm !== 0)
             $fatal(1, "one-byte SET_DIR used an operand");
 
         // Single-cycle WAIT completes without fetching an operand.
