@@ -1,11 +1,11 @@
 # Protocol Emulator ASIC — SHIFT_IN, SHIFT_OUT, MOVE, and CMP Microarchitecture
 
-**Status:** Proposed implementation contract — review and freeze together before parallel RTL work  
+**Status:** Standalone RTL implemented and verified; `protocol_core` integration and end-to-end instruction tests remain pending
 **Milestone:** Add `SHIFT_IN`, `SHIFT_OUT`, `MOV_IMM`, `MOV_REG`, `CMP_IMM`, `CMP_REG`, and `SET_DIR` to the existing non-pipelined core  
 **Authors/ownership:** Two-person split defined in §9  
-**Existing documents:** `protocol_emulator_ISA_v1_proposed(2).md` and `Protocol_Emulator_WAIT_WAIT_C_Microarchitecture_v1_1.md`
+**Existing documents:** `protocol_emulator_ISA_v1_proposed.md` and `Protocol_Emulator_WAIT_WAIT_C_Microarchitecture_v1_1.md`
 
-> **Important ISA compatibility note:** The currently uploaded ISA defines equality-only CMP, `eq_flag`, and `BR_EQ`/`BR_NE`. **EQ/LT/GT using `IR[1:0]` is a proposed ISA revision**, not yet part of that file. Both team members must approve §2 and update the ISA document **before** treating the extended encoding as frozen. This implementation proposal otherwise preserves the existing instruction layout, non-pipelined execution timing, and PC-on-retirement policy.
+> **Current encoding authority:** The agreed microarchitecture and `rtl/isa_pkg.sv` define CMP EQ/unsigned LT/unsigned GT in IR[1:0]. `protocol_emulator_ISA_v1_proposed.md` now records these encodings and the persistent `cmp_flag`. Older equality-only flag descriptions are superseded. Branch execution remains future work.
 
 ---
 
@@ -14,11 +14,11 @@
 1. **One shared two-entry register file**: R0 and R1, each 8 bits, not separate shift registers for each instruction.
 2. **One physical write port** to the register file. All four register-writing operations (`SHIFT_IN`, `SHIFT_OUT SHIFT`, `MOV_IMM`, `MOV_REG`) feed one writeback mux and one write enable. `CMP` never writes a data register.
 3. **Two always-readable outputs** (`r0_data`, `r1_data`). No separate read-enable is needed for a two-register flip-flop bank with combinational reads.
-4. **One common shift-direction flag**: `shift_dir=0` means RIGHT; `shift_dir=1` means LEFT. The controller owns it, and only `SET_DIR` changes it.
+4. **One common shift-direction flag**: controller `direction=0` means RIGHT and `direction=1` means LEFT. It connects to the datapath input `shift_dir`; only SET_DIR changes it.
 5. **One persistent comparison flag**: `cmp_flag` stores whether the most recent selected EQ/LT/GT comparison evaluated true. Only CMP changes it; reset clears it.
 6. **Four GPIO pins** each have their own *registered output value* and *registered output-enable*. `RELEASE` means `oe=0`, not a four-way data-mux output of `'z` inside the core.
 7. **Two-flop input synchronizers** for all four raw GPIO input bits. `SHIFT_IN` samples the synchronized value once, at the instruction's retirement edge.
-8. **Same existing multicycle FSM**: ordinary 1-byte operations use one `FETCH_OPCODE` cycle and one `EXECUTE` cycle (2 total); immediate operations use `FETCH_OPCODE`, `FETCH_OPERAND`, `EXECUTE` (3 total). No pipeline, forwarding, new state, or branch flush.
+8. **Same existing multicycle FSM**: ordinary 1-byte operations use one `FETCH` cycle and one `EXECUTE` cycle (2 total); immediate operations use `FETCH`, `FETCH_OPERAND`, `EXECUTE` (3 total). No pipeline, forwarding, new state, or branch flush.
 9. **No general-purpose ALU**: implement byte selection, fixed-direction shifts, and unsigned equality/ordering compares only.
 10. **No multiple ownership of state**: the controller, register bank, GPIO datapath, and compare flag each have exactly one RTL owner.
 
@@ -32,7 +32,7 @@
 
 ---
 
-## 2. Proposed ISA details — freeze before writing RTL
+## 2. Agreed ISA details
 
 ### 2.1 Existing instruction encodings (unchanged)
 
@@ -46,7 +46,7 @@
 
 `SHIFT_OUT` modes `[1:0]`: `00` drive 0, `01` drive 1, `10` release (`oe=0`), `11` output endpoint bit + shift once. The `reg` field is ignored for fixed-output modes.
 
-### 2.2 Proposed CMP extension (changes existing ISA)
+### 2.2 CMP operations
 
 Keep CMP in the `MOVE` opcode family (`110`), retain the two current submodes, and redefine the low two bits **only for CMP**:
 
@@ -70,82 +70,70 @@ Keep CMP in the `MOVE` opcode family (`110`), retain the two current submodes, a
 - Future branches should interpret the one-bit flag as `BR_TRUE` / `BR_FALSE`, or keep the old `BR_EQ` / `BR_NE` names as *assembler aliases only for equality comparisons*. **If retaining old branch mnemonics, document their actual semantics.** The branch encoding can remain unchanged.
 - EQ/LT/GT plus true/false branches cover EQ/NE, LT/GE, GT/LE; no signed operations in this milestone.
 
-**Required documentation action:** update the main ISA Markdown with these changes and rename `eq_flag` references consistently. Do not quietly implement a different ISA from the assembler/documentation.
+**Documentation agreement:** The ISA reference and package use `cmp_flag`, EQ/LT/GT and future BR_TRUE/BR_FALSE semantics. There is no assembler implementation or branch execution in this milestone.
 
 ---
 
 ## 3. Datapath partition and ownership
 
 ```text
-                       instruction_control (Person A)
-                      [IR, IMM, PC, FSM, shift_dir]
-                  EXECUTE strobes + reg/pin/mode/immediate
-                                     |
-                 +-------------------+--------------------+
-                 |                                        |
-                 v                                        v
-  shift_move_datapath (Person B)                 cmp_datapath (Person A)
-  +--------------------------------+            +--------------------------+
-  | synchronized GPIO inputs [3:0] |            | A = selected Rn          |
-  | GPIO output value [3:0]        |            | B = IMM or Rother        |
-  | GPIO output enable [3:0]       |            | EQ / unsigned LT / GT    |
-  | shift & MOVE writeback mux     |            | cmp_flag FF              |
-  |       +----------------+       |            +-------------^------------+
-  |       | data_registers |       |                          |
-  |       | R0[7:0],R1[7:0]|-------+-------- r0_data,r1_data --+
-  |       | 1 write port   |       |
-  |       +----------------+       |
-  +--------------------------------+
-                                     |
-                         protocol_core (Person A)
-                      wires modules; physical pads
-                   remain a separate wrapper concern
+pc --pc_value--> inst_fetch --ir--> control_unit
+                     |                 |
+                     | imm             | execution strobes and selectors
+                     v                 v
+             shift_datapath         cmp_datapath
+               register_file --R0/R1----> | cmp_flag
+               GPIO sync/value/enable
 ```
 
-**No one creates a second R0/R1**, second `cmp_flag`, or second `shift_dir` register. The top level is wiring, not a place to duplicate state.
+`protocol_core` will wire these blocks; it has not been implemented. Immediate data comes directly from `inst_fetch.imm`, not through the controller. Integration forms `t_write_data={ir[4:0],imm}` for `wait_timer` and `wait_c_nonzero=|t_write_data` for the controller.
+
+Every architectural register has one owner. There is one R0/R1 bank, one direction flag and one comparison flag.
 
 ### 3.1 Registers / state ownership
 
 | State | Width | Reset | Only writer / owner |
 |---|---:|---|---|
-| R0, R1 | 8 each | 0 | `data_registers` (B), using its single write port |
-| `gpio_out_value` | 4 | 0 | `shift_move_datapath` (B) |
-| `gpio_out_enable` | 4 | 0 (pins released) | `shift_move_datapath` (B) |
-| GPIO sync stage 1 / stage 2 | 4 each | 0 | `shift_move_datapath` (B) |
+| R0, R1 | 8 each | 0 | `register_file` (B), using its single write port |
+| `gpio_out_value` | 4 | 0 | `shift_datapath` (B) |
+| `gpio_out_enable` | 4 | 0 (pins released) | `shift_datapath` (B) |
+| GPIO sync stage 1 / stage 2 | 4 each | 0 | `shift_datapath` (B) |
 | `cmp_flag` | 1 | 0 | `cmp_datapath` (A) |
-| `shift_dir` | 1 | RIGHT = 0 | `instruction_control` (A) |
-| PC, IR, IMM, FSM | existing | unchanged | `instruction_control` (A) |
+| `direction` | 1 | RIGHT = 0 | `control_unit` (A); wired to B's `shift_dir` |
+| PC | 8 | 0 | `pc` (A) |
+| IR, IMM | 8 each | 0 | `inst_fetch` (A) |
+| FSM | 2 | FETCH | `control_unit` (A) |
 | T and WAIT counter | existing | unchanged | `wait_timer` (existing B module) |
 
 ---
 
 ## 4. Frozen module interfaces
 
-These are *interfaces only*, **not complete implementations**. Port names and cycle semantics are the shared integration contract. The team may rename them once by agreement **before both branches start**, not independently afterward.
+The interfaces below describe the current standalone RTL. Keep these names and cycle semantics consistent during integration. Internal register-file write signals are `write_en` and `write_data`; its destination input is `write_sel`.
 
-### 4.1 `rtl/data_registers.sv` — Person B
+### 4.1 `rtl/register_file.sv` — Person B
 
 ```systemverilog
-module data_registers (
+module register_file (
     input  logic       clk,
     input  logic       rst,
-    input  logic       rf_write_en,
-    input  logic       rf_write_sel,   // 0 -> R0, 1 -> R1
-    input  logic [7:0] rf_write_data,
+    input  logic       write_en,
+    input  logic       write_sel,   // 0 -> R0, 1 -> R1
+    input  logic [7:0] write_data,
     output logic [7:0] r0_data,
     output logic [7:0] r1_data
 );
 ```
 
 - Registers are two sets of eight flip-flops. Synchronous active-high reset sets both to `8'h00`.
-- `rf_write_en=1` performs **exactly one** write at the rising edge to the selected register; otherwise both hold.
+- `write_en=1` performs **exactly one** write at the rising edge to the selected register; otherwise both hold.
 - `r0_data`/`r1_data` expose current register contents **combinationally**, without read-enable.
 - Do not add a second register-file write port for each instruction. Do not register the read outputs as a separate pipeline stage.
 
-### 4.2 `rtl/shift_move_datapath.sv` — Person B
+### 4.2 `rtl/shift_datapath.sv` — Person B
 
 ```systemverilog
-module shift_move_datapath (
+module shift_datapath (
     input  logic       clk,
     input  logic       rst,
 
@@ -174,9 +162,9 @@ module shift_move_datapath (
 );
 ```
 
-Internally **instantiate `data_registers`**. This module owns the selected-register read mux, opposite-register selection, shift-result logic, MOV result selection, and the **one writeback mux** that drives `rf_write_*`.
+Internally **instantiate `register_file`**. This module owns the selected-register read mux, opposite-register selection, shift-result logic, MOV result selection, and the **one writeback mux** that drives `write_en`, `write_sel`, and `write_data`.
 
-Input sync: `gpio_sync1` captures `gpio_in_async` on each rising edge and `gpio_sync2` captures previous `gpio_sync1`; expose `gpio_in_sync = gpio_sync2` as a combinational output so future `PIN_CTRL` can reuse the same synchronizer. `SHIFT_IN` uses **pre-edge `gpio_sync2[pin_sel]`** on its retirement edge. Reset both synchronizer stages. Other instructions do not modify synchronization behavior.
+Input sync: `gpio_sync1` captures `gpio_in_async` on each rising edge; the registered output `gpio_in_sync` captures the previous `gpio_sync1`. `gpio_in_sync` is itself the second stage; no third register is required. Future PIN_CTRL can reuse it. SHIFT_IN uses **pre-edge `gpio_in_sync[pin_sel]`** on its retirement edge. Reset both synchronizer stages. Other instructions do not modify synchronization behavior.
 
 **Register write conditions** (exactly one at a time):
 
@@ -222,43 +210,51 @@ module cmp_datapath (
 ```
 
 - `A` = selected Rn; `B` = `imm_data` if `exec_cmp_imm`, else opposite Rother if `exec_cmp_reg`.
-- `cmp_op`: `00` EQ, `01` unsigned LT, `10` unsigned GT. `11` is illegal and **must not** write flag; control reports illegal instruction.
+- `cmp_op`: `00` EQ, `01` unsigned LT, `10` unsigned GT. `11` is illegal and **must not** write the flag; current control stalls with no write strobe and no separate fault output.
 - At a rising edge with exactly one valid CMP strobe, `cmp_flag <= comparison_result`. Reset clears it; otherwise it **holds**, including during MOV or SHIFT instructions.
 - **Do not write R0/R1** here; compare inputs are read-only.
 - No subtractor or full ALU is required. Synthesis may implement shared ordering logic; compare area in synthesis rather than making a premature claim.
 
-### 4.4 Additions to existing `instruction_control.sv` — Person A
+### 4.4 `rtl/control_unit.sv` — Person A
 
-Preserve all previously frozen WAIT_C/WAIT ports and behavior. Add these **outputs**, which are defined relative to its registered IR/IMM and current FSM state:
+The current interface is:
 
 ```systemverilog
-output logic       exec_shift_in,
-output logic       exec_shift_out,
-output logic       exec_mov_imm,
-output logic       exec_mov_reg,
-output logic       exec_cmp_imm,
-output logic       exec_cmp_reg,
-output logic       reg_sel,
-output logic [1:0] pin_sel,
-output logic [1:0] shift_out_mode,
-output logic [1:0] cmp_op,
-output logic [7:0] imm_data,
-output logic       shift_dir
+module control_unit (
+    input   logic [7:0]   inst,
+    input   logic [7:0]   ir,
+    input   logic         wait_c_nonzero,
+    input   logic         clk,
+    input   logic         reset,
+    input   logic         wait_is_single_cycle,
+    input   logic         wait_is_last_cycle,
+
+    output  logic         ir_load,
+    output  logic         imm_load,
+    output  logic         wait_start,
+    output  logic         wait_c_write,
+    output  logic [1:0]   wait_mode,
+    output  logic         wait_tick,
+    output  logic [1:0]   pc_sel,
+    output  logic         direction,
+    output  logic         exec_shift_in,
+    output  logic         exec_shift_out,
+    output  logic         exec_mov_imm,
+    output  logic         exec_mov_reg,
+    output  logic         exec_cmp_imm,
+    output  logic         exec_cmp_reg,
+    output  logic         reg_sel,
+    output  logic [1:0]   pin_sel,
+    output  logic [1:0]   shift_out_mode,
+    output  logic [1:0]   cmp_op
+);
 ```
 
-The controller also receives `cmp_flag` as a one-bit **input** for future branches; there is no need to use it for branch execution yet. `shift_dir` is the controller's one-bit stored state. Implement legal SET_DIR so it updates `shift_dir <= IR[0]` on its EXECUTE retirement edge. SET_DIR must **not** trigger `wait_start` or touch the timer.
+The controller owns only its four-state FSM and persistent `direction` flag. `pc` owns PC; `inst_fetch` owns IR/IMM and addressing. `inst` supplies live length predecode; `ir` supplies execution fields. `ir_load` and `imm_load` control capture in FETCH and FETCH_OPERAND respectively. No immediate-data bus enters or leaves the controller. Its one-bit `wait_c_nonzero` input checks the full candidate T, not only IMM or the timer's previously stored T.
 
-**Derived signals:**
+`direction` resets RIGHT and changes only on legal SET_DIR completion; connect it to `shift_datapath.shift_dir`. CMP flag storage belongs solely to `cmp_datapath`. A future branch implementation will add a controller `cmp_flag` input when needed; it is absent today.
 
-```text
-reg_sel       = IR[4]
-pin_sel       = IR[3:2]
-shift_out_mode= IR[1:0]
-cmp_op        = IR[1:0]   (only meaningful on CMP)
-imm_data      = IMM[7:0]
-```
-
-The controller may expose these wires continuously; downstream modules use them **only when their corresponding `exec_*` strobe is high**. Every `exec_*` strobe is high **only in the valid instruction's final EXECUTE cycle**, not during FETCH and not while reset is asserted. No strobe may remain high for more than one clock edge per instruction. No two execution strobes are simultaneously high.
+Derived control selectors are `reg_sel=ir[4]`, `pin_sel=ir[3:2]`, `shift_out_mode=ir[1:0]`, and `cmp_op=ir[1:0]`. Consumers use a selector only when its execution strobe is high. All execution strobes are low during reset and fetch, and are mutually exclusive. A legal instruction's strobe is sampled once at its final EXECUTE rising edge.
 
 **Validity / instruction lengths:**
 
@@ -270,13 +266,13 @@ The controller may expose these wires continuously; downstream modules use them 
 | `MOVE 01` = CMP_IMM | **Yes** | `[1:0] != 11` | `exec_cmp_imm` |
 | `MOVE 10` = MOV_REG | No | `[1:0] == 00` | `exec_mov_reg` |
 | `MOVE 11` = CMP_REG | No | `[1:0] != 11` | `exec_cmp_reg` |
-| `WAIT/SET_DIR` (`001`, submode `11`) | No | `[2:1] == 00` | write `shift_dir` |
+| `WAIT/SET_DIR` (`001`, submode `11`) | No | `[2:1] == 00` | write `direction` |
 
-Illegal/reserved instructions **must not emit writes or retire silently**; reuse the original controller's `illegal_inst` mechanism. PC advances by **1 for a legal one-byte instruction** and **2 for MOV_IMM/CMP_IMM**, **at retirement only**. No PC changes during either fetch state. The existing WAIT timing remains unchanged.
+Illegal/reserved instructions hold PC and remain in EXECUTE without emitting write strobes. Current RTL has no `illegal_inst` output or trap mechanism. Reserved immediate encodings still fetch their second byte; legality is separate from length. PC advances by **1 for a legal one-byte instruction** and **2 for MOV_IMM/CMP_IMM**, **at retirement only**. No PC changes during either fetch state. The existing WAIT timing remains unchanged.
 
-### 4.5 Top-level `rtl/protocol_core.sv` — Person A
+### 4.5 Planned top-level `rtl/protocol_core.sv` — Person A
 
-Retain the existing instruction-memory port (`inst_addr[7:0]`, `inst[7:0]`), plus `clk`/`rst`. Extend the module with these *pad-facing logic* ports:
+The top-level is not implemented yet. Provide the instruction-memory port (`inst_addr[7:0]`, `inst[7:0]`), plus `clk`/`rst`. Extend the module with these *pad-facing logic* ports:
 
 ```systemverilog
 input  logic [3:0] gpio_in_async,
@@ -286,17 +282,17 @@ output logic [3:0] gpio_out_enable
 
 Keep the `gpio_in_sync[3:0]` signal available as an **internal top-level wire** for future `PIN_CTRL` (it does not need to be an external pin).
 
-Wire `instruction_control`, existing `wait_timer`, `shift_move_datapath`, and `cmp_datapath`; route `r0_data`/`r1_data` from Person B directly to CMP. Route `cmp_flag` back to controller for future branching, but no branch feature is required this milestone. The top must not copy storage, add a second register write driver, or implement internal pad tri-states.
+Wire `pc`, `inst_fetch`, `control_unit`, `wait_timer`, `shift_datapath`, and `cmp_datapath`; route R0/R1 directly from the register bank to CMP and saved IMM directly from `inst_fetch` to both datapaths. Keep `cmp_flag` available internally for future branching; the controller does not consume it yet. Connect common active-high synchronous reset to `control_unit.reset`/`pc.reset`/`inst_fetch.reset` and the datapaths' `rst` ports. The top must not copy storage, add a second register write driver, or implement internal pad tri-states.
 
 ---
 
 ## 5. Exact instruction behavior and timing
 
-**All state commits occur at the retiring EXECUTE rising edge**. One-byte instructions take two system clocks; two-byte instructions take three. The previous README's PC-on-retirement and synchronous-reset contract still applies.
+**For the instructions below, register/GPIO/flag effects commit at the final EXECUTE rising edge**. Input synchronizers continue updating on every clock independently. One-byte instructions take two system clocks; two-byte instructions take three. The previous README's PC-on-retirement and synchronous-reset contract still applies.
 
 | Instruction | Fetches | EXECUTE edge effect | PC after retirement |
 |---|---:|---|---|
-| `SET_DIR` | 1 | Update `shift_dir` | +1 |
+| `SET_DIR` | 1 | Update `direction` | +1 |
 | `SHIFT_IN` | 1 | Read synchronized selected pin and update selected Rn once | +1 |
 | `SHIFT_OUT` | 1 | Update selected pin state; shift Rn once only for mode 11 | +1 |
 | `MOV_REG` | 1 | Copy other register into selected register | +1 |
@@ -348,10 +344,10 @@ This catches accidental signed-comparison or operand-order bugs. A subsequent MO
 | `pin_sel` | A control | B | `IR[3:2]`, selects exactly one P0–P3 |
 | `shift_out_mode` | A control | B | `IR[1:0]`, only valid with SHIFT_OUT |
 | `cmp_op` | A control | A CMP | `IR[1:0]`, only valid with CMP |
-| `imm_data` | A control | B and A CMP | Latched extension byte, valid for immediate instructions |
-| `shift_dir` | A control | B | Persistent 0 RIGHT / 1 LEFT; reset 0 |
+| `imm_data` | A fetch (`imm`) | B and A CMP | Latched extension byte, valid for immediate instructions |
+| `direction` → `shift_dir` | A control | B | Persistent 0 RIGHT / 1 LEFT; reset 0 |
 | `r0_data`, `r1_data` | B register bank | A CMP | Always-readable current byte values |
-| `cmp_flag` | A CMP | A control | Persistent result; updated only on legal CMP retirement |
+| `cmp_flag` | A CMP | future branch control | Persistent result; updated only on legal CMP retirement |
 | `gpio_in_async[3:0]` | external pin/testbench | B synchronizer | May be asynchronous; **never** directly sampled by SHIFT_IN |
 | `gpio_in_sync[3:0]` | B synchronizer | B SHIFT_IN; future A PIN_CTRL | Stable synchronized input vector; available without adding a second synchronizer |
 | `gpio_out_value[3:0]` | B | pad/wrapper/testbench | Registered pin output data |
@@ -359,7 +355,7 @@ This catches accidental signed-comparison or operand-order bugs. A subsequent MO
 
 **Global edge rule:** The controller asserts instruction `exec_*` signals *before* the final EXECUTE rising edge. Datapath/flag registers sample them on that edge. The controller updates PC and FSM on the **same** edge. The next instruction fetch observes the new architectural state.
 
-**Single writer rule:** There is no global `rf_read_enable` or separate `rf_write_enable` from the control FSM; Person B generates the register-bank's final `rf_write_en/sel/data` from decoded legal execution strobes inside the shift/MOVE datapath. A's control outputs say *what instruction is retiring*, not *how to arbitrate several physical register write ports*.
+**Single writer rule:** There is no global `rf_read_enable` or separate `write_enable` from the control FSM; Person B generates the register-bank's final `write_en/sel/data` from decoded legal execution strobes inside the shift/MOVE datapath. A's control outputs say *what instruction is retiring*, not *how to arbitrate several physical register write ports*.
 
 **Illegal-command rule:** A must never assert two `exec_*` strobes simultaneously, nor assert any during reset or FETCH. If multiple strobes appear, simulations should report an error rather than relying on arbitrary mux priority. Reserved encoding must not corrupt registers or flags.
 
@@ -367,7 +363,7 @@ This catches accidental signed-comparison or operand-order bugs. A subsequent MO
 
 ## 7. Suggested decoder and writeback structure
 
-Inside B's `shift_move_datapath`, first derive the **selected** and **other** register values (read-only combinational). Then compute each possible writeback value. A final selection chooses one data value and drives `rf_write_en`, `rf_write_sel`, `rf_write_data` into the *one* register-file write port.
+Inside B's `shift_datapath`, first derive the **selected** and **other** register values (read-only combinational). Then compute each possible writeback value. A final selection chooses one data value and drives `write_en`, `write_sel`, `write_data` into the *one* register-file write port.
 
 ```text
 R0 ----+--> selected/other read mux --> SHIFT_IN shift result ----+
@@ -402,14 +398,14 @@ Avoid creating a dedicated register bank inside each instruction module. Avoid a
 
 ### 8.2 Person A: standalone decode/control/CMP tests
 
-- [ ] All six legal MOVE/CMP variants generate exactly the expected execution strobe and instruction length.
+- [ ] All four MOVE-family submodes and three CMP operations generate exactly the expected execution strobe and instruction length.
 - [ ] CMP `00/01/10` handles equality, less-than, and greater-than for both IMM and REG sources.
 - [ ] CMP operand order is correct for `reg_sel=0` and `reg_sel=1` (especially LT/GT).
 - [ ] Unsigned boundary tests: 0, 1, 127, 128, 254, 255.
 - [ ] `cmp_flag` holds across MOV, SHIFT, WAIT, and SET_DIR, and resets to 0.
 - [ ] `SET_DIR RIGHT/LEFT` updates one persistent bit and **never starts WAIT**.
 - [ ] FETCH versus EXECUTE produces no early or repeated register/flag/GPIO write strobes.
-- [ ] Reserved SHIFT_IN bit patterns, reserved CMP `op=11`, invalid MOV low bits, and invalid SET_DIR fields assert `illegal_inst` without a write.
+- [ ] Reserved SHIFT_IN bit patterns, reserved CMP `op=11`, invalid MOV low bits, and invalid SET_DIR fields stall without a write or PC advance; no `illegal_inst` port exists.
 - [ ] PC remains fixed through FETCH states and advances only on final EXECUTE edge: +1 for one-byte operations, +2 for immediate operations.
 
 ### 8.3 Shared end-to-end integration tests
@@ -438,54 +434,54 @@ Avoid creating a dedicated register bank inside each instruction module. Avoid a
 | `MOV_IMM R0,8'hA5` | `C0 A5` | 2 bytes |
 | `MOV_IMM R1,8'h3C` | `D0 3C` | 2 bytes |
 | `MOV_REG R1,R0` | `D8` | 1 byte |
-| `CMP_IMM R0,8'hA5,EQ` | `C4 A5` | 2 bytes; proposed CMP bits |
-| `CMP_IMM R0,8'h64,LT` | `C5 64` | 2 bytes; proposed CMP bits |
-| `CMP_REG R0,R1,GT` | `CE` | 1 byte; proposed CMP bits |
+| `CMP_IMM R0,8'hA5,EQ` | `C4 A5` | 2 bytes; EQ |
+| `CMP_IMM R0,8'h64,LT` | `C5 64` | 2 bytes; unsigned LT |
+| `CMP_REG R0,R1,GT` | `CE` | 1 byte; unsigned GT |
 
-**Check:** `MOV_IMM` and `CMP_IMM` bytes use **the existing opcode plus low two bits**; only CMP's newly assigned `01/10` comparison modes are an ISA extension. Keep the assembler synchronized with this table.
+**Check:** `MOV_IMM` and `CMP_IMM` bytes use **the existing opcode plus low two bits**; CMP uses `01/10` for unsigned LT/GT in the current encoding reference. Keep the assembler synchronized with this table.
 
 ---
 
-## 9. Two-person workload split — work in separate files
+## 9. Two-person ownership and remaining integration
 
 The preferred split **preserves the team's earlier ownership**: Person A already owns the instruction control, and Person B already owns timing/datapath work. That is less risky than handing Person B a second piece of the control FSM.
 
 | Task | Owner | Files | Deliverable |
 |---|---|---|---|
-| **1. Control/status flags** | **Person A** | `rtl/instruction_control.sv` | Decode/validity, fetch length, EXECUTE strobes, persistent `shift_dir`, existing FSM/PC updates |
+| **1. Control/status flags** | **Person A** | `rtl/control_unit.sv` | Decode/validity, fetch length, EXECUTE strobes, persistent `direction`, FSM and PC selection |
 | **2. Comparison datapath** | **Person A** | `rtl/cmp_datapath.sv`, `tb/tb_cmp_datapath.sv` | `cmp_flag` and EQ/LT/GT comparison, verified independently |
-| **3. Register file** | **Person B** | `rtl/data_registers.sv`, `tb/tb_data_registers.sv` | R0/R1 reset, combinational read, exactly one enabled write port |
-| **4. SHIFT_IN/SHIFT_OUT datapath** | **Person B** | `rtl/shift_move_datapath.sv`, `tb/tb_shift_move_datapath.sv` | Shared shift/MOV writeback mux, GPIO value/enable registers, synchronized inputs |
+| **3. Register file** | **Person B** | `rtl/register_file.sv`, `tb/tb_register_file.sv` | R0/R1 reset, combinational read, exactly one enabled write port |
+| **4. SHIFT_IN/SHIFT_OUT datapath** | **Person B** | `rtl/shift_datapath.sv`, `tb/tb_shift_datapath.sv` | Shared shift/MOV writeback mux, GPIO value/enable registers, synchronized inputs |
 | **System hookup** | **Person A** | `rtl/protocol_core.sv`, `tb/tb_shift_move_integration.sv` | Connect modules; instruction-level regression |
-| **ISA/doc contract** | **A+B together** | `ISA.md` (team's canonical path), this Markdown | Freeze CMP bits/branch-flag terminology before independent changes |
+| **ISA/doc contract** | **A+B together** | `protocol_emulator_ISA_v1_proposed.md`, this Markdown | Freeze CMP bits/branch-flag terminology before independent changes |
 
 **Why not split SHIFT_IN to A and SHIFT_OUT to B?** Both need the same R0/R1 write port and shift-direction logic; separate authors can accidentally create multiple writers or duplicate state. A/B split by *state ownership and module boundary*, not by opcodes, avoids these conflicts.
 
-### Before separating — both people must agree
+### Interface agreement checklist
 
 - [ ] CMP bit assignments and unsigned interpretation (§2.2), including flag name `cmp_flag`.
 - [ ] R0/R1 are read combinationally; there is only **one** register-file write port.
 - [ ] Module and port declarations in §4, including reset polarity and clock edge.
 - [ ] `exec_*` are one-cycle retirement strobes, never fetch-stage enables.
-- [ ] `shift_dir` is stored **only** in `instruction_control`; it resets RIGHT.
+- [ ] `direction` is stored **only** in `control_unit` and wired to B's `shift_dir`; it resets RIGHT.
 - [ ] `cmp_flag` is stored **only** in `cmp_datapath`; it resets 0.
 - [ ] GPIO tri-state is represented as separate `value` and `enable` vectors, not `'z` internal datapath values.
-- [ ] `gpio_sync2` drives SHIFT_IN, and testbenches account for input synchronizer latency.
+- [ ] `gpio_in_sync` (the second stage) drives SHIFT_IN, and testbenches account for input synchronizer latency.
 - [ ] Which person integrates: **A owns `protocol_core.sv`**, B reviews all B-side connections.
 - [ ] Existing WAIT/WAIT_C ports, FSM encoding, and timing remain unchanged.
 
 ### Each person can work independently
 
-**Person A:** Keep temporary fake `r0_data`/`r1_data` inputs in the standalone comparator testbench; no dependency on B's register bank for comparator unit testing. In control testbench, assert each opcode generates only the intended strobe, with correct PC increment and `illegal_inst` behavior. Implement `SET_DIR` in the controller; do not create a second direction flag in CMP or top level.
+**Person A:** Keep temporary fake `r0_data`/`r1_data` inputs in the standalone comparator testbench; no dependency on B's register bank for comparator unit testing. In control testbench, assert each opcode generates only the intended strobe, with correct PC increment and reserved-encoding stalls. Implement `SET_DIR` in the controller; do not create a second direction flag in CMP or top level.
 
-**Person B:** Stimulate `shift_move_datapath` directly using `exec_*` pulses and manually driven `reg_sel`, `pin_sel`, and `shift_dir`, without needing the instruction decoder. Unit-test the register bank separately first. Include `MOV_IMM` and `MOV_REG` in your writeback mux, although your assigned ISA theme is SHIFT_IN/SHIFT_OUT. Do not modify the controller FSM or comparator flag.
+**Person B:** Stimulate `shift_datapath` directly using `exec_*` pulses and manually driven `reg_sel`, `pin_sel`, and `shift_dir`, without needing the instruction decoder. Unit-test the register bank separately first. Include `MOV_IMM` and `MOV_REG` in your writeback mux, although your assigned ISA theme is SHIFT_IN/SHIFT_OUT. Do not modify the controller FSM or comparator flag.
 
-### Suggested build order
+### Milestone sequence (standalone implementation complete)
 
-1. **Together (short kickoff):** approve ISA change; freeze §4 ports; commit this document / ISA edit to main.
-2. **B:** implement and test `data_registers.sv`; then `shift_move_datapath.sv` using direct execution strobes.
-3. **A:** add `SET_DIR` and all new decode strobes; independently implement/test `cmp_datapath.sv` with fake register data.
-4. **A:** wire `protocol_core.sv` after both unit tests compile; add instruction-level tests.
+1. **Completed in RTL:** shared package definitions and the module interfaces in §4.
+2. **Completed in standalone RTL:** register-file and shift/MOVE datapath, tested using direct execution strobes.
+3. **Completed in standalone RTL:** SET_DIR and execution decoding, plus comparator tests with fake register inputs.
+4. **Pending — A:** wire `protocol_core.sv` and add instruction-level tests, including the deferred SET_DIR direction tests.
 5. **Together:** run combined regressions, inspect waves, correct interface bugs, and decide whether future DATA_IO writeback needs a new mux input (it will, but not now).
 
 ### GitHub workflow
@@ -510,12 +506,18 @@ Ignore generated `.vvp`, `.vcd`, and `build/` artifacts; commit source `.sv`, te
 
 ## 10. Critical stop conditions / known boundaries
 
-- **ISA mismatch:** If the canonical ISA still specifies only `eq_flag`, EQ-only CMP, and BR_EQ/BR_NE, do not claim the EQ/LT/GT RTL conforms to it until updated.
-- **Multiple register writers:** If R0 or R1 is assigned in more than `data_registers.sv`, stop and consolidate to one write port.
+- **ISA consistency:** Keep EQ/LT/GT encodings, `cmp_flag`, and future BR_TRUE/BR_FALSE terminology consistent with `isa_pkg.sv` and the current ISA reference.
+- **Multiple register writers:** If R0 or R1 is assigned in more than `register_file.sv`, stop and consolidate to one write port.
 - **GPIO high-Z mistake:** If logic inside the processor tries to feed `'z` through the shift-result/register write mux, stop; use `gpio_out_enable`.
 - **Timing ambiguity:** If any unit asserts a write-enable in FETCH or modifies PC before retirement, it violates the prior WAIT/WAIT_C microarchitecture contract.
 - **CDC/sampling ambiguity:** If tests change an asynchronous raw GPIO input at the same edge they expect SHIFT_IN to consume it, the test is invalid for a two-stage synchronizer.
 - **MOV/CMP overlap:** If CMP writes Rn or MOV overwrites `cmp_flag`, the implementation is incorrect.
 - **Illegal encoding:** If CMP mode `11` or MOV low bits nonzero silently execute, controller validation is incomplete.
 
-**Milestone sign-off:** Both independent unit suites pass; SET_DIR, shifts, MOVE, and CMP retire on the specified edges; integration preserves the old timer regression; R0/R1 and GPIO state changes occur exactly once on legal retirement edges; `cmp_flag` matches the selected unsigned comparison and persists until the next CMP/reset.
+**Pending integration sign-off:** Both independent unit suites pass; SET_DIR, shifts, MOVE, and CMP retire on the specified edges; integration preserves the old timer regression; R0/R1 and GPIO state changes occur exactly once on legal retirement edges; `cmp_flag` matches the selected unsigned comparison and persists until the next CMP/reset.
+
+## Current verification and remaining integration
+
+The standalone suites are `tb_register_file`, `tb_shift_datapath`, `tb_cmp_datapath`, `tb_pc`, `tb_wait_timer`, `tb_control_unit_fetch` and `tb_control_unit`. See `README.md` for reproducible commands. Register-file tests cover reset, selected writes and retention. Datapath tests cover MOVE in both directions, 16 eight-bit SHIFT_IN cases, 16 eight-bit SHIFT_OUT cases, 48 fixed-output cases, two-flop latency, old endpoint output, and persistent GPIO. Comparator tests cover 432 unsigned comparisons and 20 invalid-command/retention cases. Controller tests cover all instruction lengths and all 32 MOVE-family encodings.
+
+Test counts and commands are recorded in README. These suites verify separate datapaths and the controller/timer/fetch integration. They do not replace the still-pending `protocol_core` tests for instruction-driven MOV followed by CMP, SET_DIR followed by actual shifts, GPIO commit timing, and flag retention across intervening instructions. No synthesized area or static timing result is claimed.

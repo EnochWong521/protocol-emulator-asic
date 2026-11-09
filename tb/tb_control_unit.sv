@@ -66,9 +66,14 @@ module tb_control_unit;
         .direction(direction),
         .exec_shift_in(),
         .exec_shift_out(),
+        .exec_mov_imm(),
+        .exec_mov_reg(),
+        .exec_cmp_imm(),
+        .exec_cmp_reg(),
         .reg_sel(),
         .pin_sel(),
-        .shift_out_mode()
+        .shift_out_mode(),
+        .cmp_op()
     );
 
     //clock

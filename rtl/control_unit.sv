@@ -17,9 +17,14 @@ module control_unit (
     output  logic         direction,
     output  logic         exec_shift_in,
     output  logic         exec_shift_out,
+    output  logic         exec_mov_imm,
+    output  logic         exec_mov_reg,
+    output  logic         exec_cmp_imm,
+    output  logic         exec_cmp_reg,
     output  logic         reg_sel,
     output  logic [1:0]   pin_sel,
-    output  logic [1:0]   shift_out_mode
+    output  logic [1:0]   shift_out_mode,
+    output  logic [1:0]   cmp_op
 );
 
     import isa_pkg::*;
@@ -58,10 +63,11 @@ module control_unit (
     assign imm_load = !reset && (state == FETCH_OPERAND);
     assign wait_mode = ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB];
 
-    // SHIFT_IN and SHIFT_OUT share register/pin field positions.
+    // SHIFT and MOVE/CMP share the register-select field at IR[4].
     assign reg_sel = ir[SHIFT_IN_REG_BIT];
     assign pin_sel = ir[SHIFT_IN_PIN_MSB:SHIFT_IN_PIN_LSB];
     assign shift_out_mode = ir[SHIFT_OUT_MODE_MSB:SHIFT_OUT_MODE_LSB];
+    assign cmp_op = ir[CMP_OP_MSB:CMP_OP_LSB];
 
     always_ff @(posedge clk) begin
         if (reset == 1) begin
@@ -88,6 +94,10 @@ module control_unit (
         wait_tick = 1'b0;
         exec_shift_in = 1'b0;
         exec_shift_out = 1'b0;
+        exec_mov_imm = 1'b0;
+        exec_mov_reg = 1'b0;
+        exec_cmp_imm = 1'b0;
+        exec_cmp_reg = 1'b0;
         pc_sel = PC_HOLD;
 
         if (!reset) begin
@@ -149,6 +159,37 @@ module control_unit (
                         exec_shift_out = 1'b1;
                         pc_sel = PC_PLUS_1;
                         next_state = FETCH;
+                    end
+                    else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_MOVE) begin
+                        case (ir[MOVE_SUBMODE_MSB:MOVE_SUBMODE_LSB])
+                            MOV_IMM, MOV_REG: begin
+                                if (ir[MOVE_LOW_MSB:MOVE_LOW_LSB] == MOV_LOW_REQUIRED) begin
+                                    exec_mov_imm =
+                                        (ir[MOVE_SUBMODE_MSB:MOVE_SUBMODE_LSB] == MOV_IMM);
+                                    exec_mov_reg =
+                                        (ir[MOVE_SUBMODE_MSB:MOVE_SUBMODE_LSB] == MOV_REG);
+                                    pc_sel = exec_mov_imm ? PC_PLUS_2 : PC_PLUS_1;
+                                    next_state = FETCH;
+                                end
+                            end
+
+                            CMP_IMM, CMP_REG: begin
+                                case (ir[CMP_OP_MSB:CMP_OP_LSB])
+                                    CMP_EQ, CMP_LT, CMP_GT: begin
+                                        exec_cmp_imm =
+                                            (ir[MOVE_SUBMODE_MSB:MOVE_SUBMODE_LSB] == CMP_IMM);
+                                        exec_cmp_reg =
+                                            (ir[MOVE_SUBMODE_MSB:MOVE_SUBMODE_LSB] == CMP_REG);
+                                        pc_sel = exec_cmp_imm ? PC_PLUS_2 : PC_PLUS_1;
+                                        next_state = FETCH;
+                                    end
+
+                                    default: begin end
+                                endcase
+                            end
+
+                            default: begin end
+                        endcase
                     end
                 end
 

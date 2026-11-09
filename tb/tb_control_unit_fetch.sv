@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// Fetch addressing, lengths, completion updates, timer commands, and SHIFT decode.
+// Fetch addressing, lengths, completion updates, timer commands, and SHIFT/MOVE/CMP decode.
 // Run from the repository root:
 // iverilog -g2012 -s tb_control_unit_fetch -o /tmp/tb_control_unit_fetch.vvp \
 //   rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv tb/tb_control_unit_fetch.sv
@@ -24,6 +24,11 @@ module tb_control_unit_fetch;
     localparam logic [31:0] LEGAL_WAIT_ENCODINGS = 32'h03010101;
     // Every fourth SHIFT_IN encoding is legal: its low two bits must be zero.
     localparam logic [31:0] LEGAL_SHIFT_IN_ENCODINGS = 32'h11111111;
+    // Independent decode tables indexed by the low five bits of a MOVE byte.
+    localparam logic [31:0] MOV_IMM_ENCODINGS = 32'h00010001; // C0, D0
+    localparam logic [31:0] MOV_REG_ENCODINGS = 32'h01000100; // C8, D8
+    localparam logic [31:0] CMP_IMM_ENCODINGS = 32'h00700070; // C4-C6, D4-D6
+    localparam logic [31:0] CMP_REG_ENCODINGS = 32'h70007000; // CC-CE, DC-DE
 
     logic clk = 1'b0;
     logic reset = 1'b1;
@@ -39,13 +44,17 @@ module tb_control_unit_fetch;
     wire wait_c_nonzero;
     wire [1:0] wait_mode;
     wire exec_shift_in, exec_shift_out, reg_sel;
-    wire [1:0] pin_sel, shift_out_mode;
+    wire exec_mov_imm, exec_mov_reg, exec_cmp_imm, exec_cmp_reg;
+    wire [1:0] pin_sel, shift_out_mode, cmp_op;
     logic [INST_WIDTH-1:0] memory [0:255];
     int checked_cycles = 0;
     int one_byte_cases = 0;
     int two_byte_cases = 0;
     int shift_in_cases = 0;
     int shift_out_cases = 0;
+    int mov_cases = 0;
+    int cmp_cases = 0;
+    int reserved_move_cases = 0;
 
     always #5 clk = ~clk;
     assign inst = memory[inst_addr];
@@ -71,7 +80,10 @@ module tb_control_unit_fetch;
         .wait_mode(wait_mode), .wait_tick(wait_tick),
         .direction(direction),
         .exec_shift_in(exec_shift_in), .exec_shift_out(exec_shift_out),
-        .reg_sel(reg_sel), .pin_sel(pin_sel), .shift_out_mode(shift_out_mode)
+        .exec_mov_imm(exec_mov_imm), .exec_mov_reg(exec_mov_reg),
+        .exec_cmp_imm(exec_cmp_imm), .exec_cmp_reg(exec_cmp_reg),
+        .reg_sel(reg_sel), .pin_sel(pin_sel), .shift_out_mode(shift_out_mode),
+        .cmp_op(cmp_op)
     );
 
     task automatic reset_case(input logic [7:0] first_byte,
@@ -82,13 +94,18 @@ module tb_control_unit_fetch;
         wait_is_last_cycle = 1'b0;
         memory[0] = first_byte;
         memory[1] = second_byte;
+        #1;
+        if ({exec_shift_in, exec_shift_out, exec_mov_imm, exec_mov_reg,
+             exec_cmp_imm, exec_cmp_reg} !== 6'b000000 || pc_sel !== PC_HOLD)
+            $fatal(1, "execution command not suppressed while reset asserted");
         @(posedge clk); #1;
         if (pc !== 0 || dut.state !== dut.FETCH ||
             ir !== 0 || imm !== 0 || direction !== DIR_RIGHT)
             $fatal(1, "reset failed");
         if (pc_sel !== PC_HOLD ||
             {ir_load, imm_load} !== 2'b00 ||
-            {wait_start, wait_c_write, wait_tick, exec_shift_in, exec_shift_out} !== 5'b00000)
+            {wait_start, wait_c_write, wait_tick, exec_shift_in, exec_shift_out,
+             exec_mov_imm, exec_mov_reg, exec_cmp_imm, exec_cmp_reg} !== 9'b000000000)
             $fatal(1, "control strobe during reset");
         @(negedge clk);
         reset = 1'b0;
@@ -102,8 +119,10 @@ module tb_control_unit_fetch;
                          input logic [7:0] expected_pc_after = 0,
                          input logic expected_write = 1'b0,
                          input logic expected_shift_in = 1'b0,
-                         input logic expected_shift_out = 1'b0);
+                         input logic expected_shift_out = 1'b0,
+                         input logic [3:0] expected_move_cmp = 4'b0000);
         logic [7:0] expected_ir, expected_imm;
+        logic previous_direction;
         #1;
         if (dut.state !== before_state || inst_addr !== expected_addr)
             $fatal(1, "fetch state/address incorrect: state=%b addr=%h",
@@ -117,19 +136,31 @@ module tb_control_unit_fetch;
             $fatal(1, "timer write/tick command incorrect");
         if (exec_shift_in !== expected_shift_in || exec_shift_out !== expected_shift_out)
             $fatal(1, "SHIFT execution strobe incorrect");
+        if ({exec_mov_imm, exec_mov_reg, exec_cmp_imm, exec_cmp_reg} !== expected_move_cmp)
+            $fatal(1, "MOVE/CMP execution strobe incorrect for IR=%h", ir);
+        if (expected_move_cmp != 0 && reg_sel !== memory[0][4])
+            $fatal(1, "MOVE/CMP register selection incorrect");
+        if (expected_move_cmp[1:0] != 0 && cmp_op !== memory[0][1:0])
+            $fatal(1, "CMP operation selection incorrect");
         if ((expected_shift_in || expected_shift_out) &&
             (reg_sel !== memory[0][4] || pin_sel !== memory[0][3:2] ||
              shift_out_mode !== memory[0][1:0]))
             $fatal(1, "SHIFT register/pin/mode decoding incorrect");
         expected_ir = (before_state == dut.FETCH) ? memory[expected_addr] : ir;
         expected_imm = (before_state == dut.FETCH_OPERAND) ? memory[expected_addr] : imm;
+        previous_direction = direction;
         @(posedge clk); #1;
         if (dut.state !== after_state || pc !== expected_pc_after)
             $fatal(1, "state transition or PC completion update incorrect");
         if (ir !== expected_ir || imm !== expected_imm)
             $fatal(1, "instruction capture/retention incorrect");
-        if (after_state == dut.FETCH && {exec_shift_in, exec_shift_out} !== 2'b00)
-            $fatal(1, "SHIFT strobe persisted after completion");
+        if (before_state == dut.EXECUTE && ir[OPCODE_MSB:OPCODE_LSB] == OP_MOVE &&
+            direction !== previous_direction)
+            $fatal(1, "MOVE/CMP changed the persistent direction flag");
+        if (after_state == dut.FETCH &&
+            {exec_shift_in, exec_shift_out, exec_mov_imm, exec_mov_reg,
+             exec_cmp_imm, exec_cmp_reg} !== 6'b000000)
+            $fatal(1, "execution strobe persisted after completion");
         checked_cycles++;
     endtask
 
@@ -183,8 +214,18 @@ module tb_control_unit_fetch;
         cycle(dut.FETCH_OPERAND, dut.EXECUTE, 8'd1, 0);
         cycle(dut.EXECUTE, dut.EXECUTE, 8'd0, 0);
 
+        // Reset must suppress a pending MOV/CMP command before its execute edge.
+        reset_case(8'hC0, 8'hA5);
+        cycle(dut.FETCH, dut.FETCH_OPERAND, 8'd0, 0);
+        cycle(dut.FETCH_OPERAND, dut.EXECUTE, 8'd1, 0);
+        reset_case(8'hC5, 8'hFF);
+        cycle(dut.FETCH, dut.FETCH_OPERAND, 8'd0, 0);
+        cycle(dut.FETCH_OPERAND, dut.EXECUTE, 8'd1, 0);
+        // The first reset in the exhaustive loop interrupts this CMP.
+
         // Include reserved encodings: length must not depend on legality.
         for (int byte_value = 0; byte_value < 256; byte_value++) begin
+            logic [3:0] expected_move_cmp;
             reset_case(INST_WIDTH'(byte_value), ~INST_WIDTH'(byte_value));
             if (TWO_BYTE_ENCODINGS[byte_value]) begin
                 cycle(dut.FETCH, dut.FETCH_OPERAND, 8'd0, 0);
@@ -205,6 +246,27 @@ module tb_control_unit_fetch;
                 cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_1, 8'd1, 0, 0, 1);
                 shift_out_cases++;
             end
+            else if (byte_value >= 192 && byte_value < 224) begin
+                expected_move_cmp = {MOV_IMM_ENCODINGS[byte_value - 192],
+                                     MOV_REG_ENCODINGS[byte_value - 192],
+                                     CMP_IMM_ENCODINGS[byte_value - 192],
+                                     CMP_REG_ENCODINGS[byte_value - 192]};
+                if (expected_move_cmp != 0) begin
+                    cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0,
+                          TWO_BYTE_ENCODINGS[byte_value] ? PC_PLUS_2 : PC_PLUS_1,
+                          TWO_BYTE_ENCODINGS[byte_value] ? 8'd2 : 8'd1,
+                          0, 0, 0, expected_move_cmp);
+                    if (expected_move_cmp[3:2] != 0)
+                        mov_cases++;
+                    else
+                        cmp_cases++;
+                end
+                else begin
+                    // Repeated stalls must not emit a write or advance PC.
+                    repeat (3) cycle(dut.EXECUTE, dut.EXECUTE, 8'd0, 0);
+                    reserved_move_cases++;
+                end
+            end
             // Unsupported opcodes and reserved encodings hold without writes.
             else if (byte_value >= 64 ||
                      (byte_value >= 32 && byte_value < 64 &&
@@ -216,8 +278,12 @@ module tb_control_unit_fetch;
             $fatal(1, "length coverage totals incorrect");
         if (shift_in_cases != 8 || shift_out_cases != 32)
             $fatal(1, "SHIFT decode coverage incomplete");
+        if (mov_cases != 4 || cmp_cases != 12 || reserved_move_cases != 16)
+            $fatal(1, "MOVE/CMP decode coverage incomplete");
         $display("PASS: %0d SHIFT_IN and %0d SHIFT_OUT encodings; reserved SHIFT_IN held",
                  shift_in_cases, shift_out_cases);
+        $display("PASS: %0d MOV, %0d CMP, %0d reserved MOVE/CMP encodings",
+                 mov_cases, cmp_cases, reserved_move_cases);
         $display("PASS: %0d one-byte and %0d two-byte encodings; %0d cycle checks",
                  one_byte_cases, two_byte_cases, checked_cycles);
         $finish;

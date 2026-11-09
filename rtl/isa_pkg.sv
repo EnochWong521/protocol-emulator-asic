@@ -7,8 +7,8 @@
 // - All bit positions below refer to the FIRST instruction byte (IR),
 //   unless explicitly labeled OPERAND_BYTE.
 // - The optional second byte is always bits [7:0] of OPERAND_BYTE.
-// - CMP_EQ/CMP_LT/CMP_GT implement the team's proposed unsigned
-//   comparison extension, which must also be reflected in the ISA document.
+// - CMP_EQ/CMP_LT/CMP_GT implement the agreed unsigned comparison
+//   operations documented in protocol_emulator_ISA_v1_proposed.md.
 // - Definitions here do not imply that all instructions have been implemented.
 
 package isa_pkg;

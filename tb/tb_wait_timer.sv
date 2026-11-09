@@ -1,11 +1,10 @@
 `timescale 1ns/1ps
 
+// iverilog -g2012 -s tb_wait_timer -o /tmp/tb_wait_timer.vvp \
+//   rtl/isa_pkg.sv rtl/wait_timer.sv tb/tb_wait_timer.sv
+// vvp /tmp/tb_wait_timer.vvp
 module tb_wait_timer;
-
-    localparam logic [1:0] WAIT_FULL    = 2'b00;
-    localparam logic [1:0] WAIT_HALF    = 2'b01;
-    localparam logic [1:0] WAIT_QUARTER = 2'b10;
-    localparam logic [1:0] SET_DIR      = 2'b11;
+    import isa_pkg::*;
 
     logic clk = 1'b0;
     logic rst;

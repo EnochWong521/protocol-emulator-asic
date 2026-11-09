@@ -10,26 +10,20 @@ module wait_timer (
     output logic        wait_is_single_cycle,
     output logic        wait_is_last_cycle
 );
+  import isa_pkg::*;
 
   // timer configuration register
   logic [12:0] t_reg;
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      t_reg <= 13'd4;
+      t_reg <= T_RESET_VALUE;
     end else if (wait_c_write) begin
       t_reg <= t_write_data;
     end
   end
 
-  // duration selection logic 
-  typedef enum logic[1:0] {
-    WAIT_FULL,
-    WAIT_HALF,
-    WAIT_QUARTER,
-    SET_DIR
-  } wait_mode_t;
-  
+  // Duration encodings are shared with the controller through isa_pkg.
   logic [12:0] wait_duration;
 
   always_comb begin

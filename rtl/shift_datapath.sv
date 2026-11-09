@@ -3,10 +3,13 @@ module shift_datapath (
     input  logic       rst,
     input  logic       exec_shift_in,
     input  logic       exec_shift_out,
+    input  logic       exec_mov_imm,
+    input  logic       exec_mov_reg,
     input  logic       reg_sel,          // 0 selects R0; 1 selects R1
     input  logic [1:0] pin_sel,          
     input  logic [1:0] shift_out_mode,   // 00 LOW, 01 HIGH, 10 RELEASE, 11 SHIFT
     input  logic       shift_dir,        // 0 shifts RIGHT; 1 shifts LEFT
+    input  logic [7:0] imm_data,
     input  logic [3:0] gpio_in_async,
     output logic [3:0] gpio_in_sync,
     output logic [3:0] gpio_out_value,
@@ -14,6 +17,7 @@ module shift_datapath (
     output logic [7:0] r0_data,
     output logic [7:0] r1_data
 );
+    import isa_pkg::*;
 
     logic [3:0] gpio_sync1;
     logic [7:0] selected_reg;
@@ -46,7 +50,7 @@ module shift_datapath (
     // Read register calculate its next value
     // The register file saves this value on the execute rising edge.
     always_comb begin
-        if (reg_sel == 1'b0) begin
+        if (reg_sel == REG_R0) begin
             selected_reg = r0_data;
         end
         else begin
@@ -58,21 +62,29 @@ module shift_datapath (
 
         if (exec_shift_in) begin
             write_en = 1'b1;
-            if (shift_dir == 1'b0) begin
+            if (shift_dir == DIR_RIGHT) begin
                 write_data = {gpio_in_sync[pin_sel], selected_reg[7:1]};
             end
             else begin
                 write_data = {selected_reg[6:0], gpio_in_sync[pin_sel]};
             end
         end
-        else if (exec_shift_out && shift_out_mode == 2'b11) begin
+        else if (exec_shift_out && shift_out_mode == SHIFT_OUT_SHIFT) begin
             write_en = 1'b1;
-            if (shift_dir == 1'b0) begin
+            if (shift_dir == DIR_RIGHT) begin
                 write_data = {1'b0, selected_reg[7:1]};
             end
             else begin
                 write_data = {selected_reg[6:0], 1'b0};
             end
+        end
+        else if (exec_mov_imm) begin
+            write_en = 1'b1;
+            write_data = imm_data;
+        end
+        else if (exec_mov_reg) begin
+            write_en = 1'b1;
+            write_data = (reg_sel == REG_R0) ? r1_data : r0_data;
         end
     end
 
@@ -84,21 +96,21 @@ module shift_datapath (
         end
         else if (exec_shift_out) begin
             case (shift_out_mode)
-                2'b00: begin
+                SHIFT_OUT_LOW: begin
                     gpio_out_value[pin_sel]  <= 1'b0;
                     gpio_out_enable[pin_sel] <= 1'b1;
                 end
-                2'b01: begin
+                SHIFT_OUT_HIGH: begin
                     gpio_out_value[pin_sel]  <= 1'b1;
                     gpio_out_enable[pin_sel] <= 1'b1;
                 end
-                2'b10: begin
+                SHIFT_OUT_RELEASE: begin
                     // Retain the stored output value while releasing the pin.
                     gpio_out_enable[pin_sel] <= 1'b0;
                 end
-                2'b11: begin
+                SHIFT_OUT_SHIFT: begin
                     gpio_out_enable[pin_sel] <= 1'b1;
-                    if (shift_dir == 1'b0) begin
+                    if (shift_dir == DIR_RIGHT) begin
                         gpio_out_value[pin_sel] <= selected_reg[0];
                     end
                     else begin

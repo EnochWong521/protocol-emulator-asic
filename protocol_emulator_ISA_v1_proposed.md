@@ -1,15 +1,15 @@
-# Protocol Emulator ISA — Proposed v1.0 Freeze
+# Protocol Emulator ISA — Current Encoding Reference
 
-Status: **UART-capable implementation proposal** (not yet verified in RTL). This is a *revised design* based on the team's `ISA.md`, not a transcription of that draft.
+Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and unsigned EQ/LT/GT comparison have standalone/controller verification. The complete `protocol_core`, instruction-level datapath integration, PIN_CTRL, LOOP, and DATA_IO are pending. The microarchitecture documents define module ownership and timing; `rtl/isa_pkg.sv` supplies shared encoding constants.
 
 ## Design contract
--
+
 - 8 primary opcodes, 3 bits each, in instruction bits `[7:5]`.
 - Byte-addressed program memory, initially 256 x 8; PC is 8 bits, reset PC = `0x00`.
 - Instructions occupy 1 or 2 bytes. First byte always has the opcode; the opcode and submode determine the length. A 2-byte instruction has its payload at `PC+1`.
 - One sequential, non-pipelined engine. Two 8-bit data registers, `R0` and `R1`.
 - Four protocol pins `P0..P3`, selected by 2 bits; each has output-value, output-enable, and synchronized input. Input can be read as 0 or 1; Z is **output release**, not an input condition.
-- Single 13-bit time-base register `T`, one timing countdown, one 5-bit hardware loop counter and `loop_active`, one equality flag, one shift direction flag.
+- Single 13-bit time-base register `T`, one timing countdown, one 5-bit hardware loop counter and `loop_active`, one comparison flag, one shift direction flag.
 - No general data RAM or ALU in v1. One host-to-engine mailbox and one engine-to-host mailbox (each 8 bits plus valid/ready semantics).
 - `PULL` and `PUSH` are architectural operations; the physical host and program-loading interface is **separate** and must be designed before tapeout. During initial RTL testing the testbench can supply that interface.
 - Only one active loop, no nested loops; no guaranteed simultaneous UART TX/RX. Protocol timing is bounded by the engine's instruction latency.
@@ -57,8 +57,8 @@ Status: **UART-capable implementation proposal** (not yet verified in RTL). This
   - `condition=00`: `BRANCH_PIN pin, LOW, target`.
   - `condition=01`: `BRANCH_PIN pin, HIGH, target`.
   - `condition=10`: `JMP target`; pin field ignored.
-  - `condition=11`: `[4]=0` reserved; `[3]=0` means `BR_EQ target`; `[3]=1` means `BR_NE target`. (This reuses the low pin-select bit to invert the equality flag.)
-- `BR_EQ` / `BR_NE` inspect the persistent equality flag last written by a `CMP` instruction; they do not read the GPIO input.
+  - `condition=11`: `[4]` must be zero; `[3]=0` means `BR_TRUE target`; `[3]=1` means `BR_FALSE target`. (This reuses the low pin-select bit to invert the comparison flag.)
+- `BR_TRUE` / `BR_FALSE` inspect the persistent comparison flag last written by a `CMP` instruction; they do not read the GPIO input.
 - Level waits complete once the sampled synchronized input has the requested logic level. Edge waits detect an input transition **while the instruction is armed in EXECUTE**. An edge that occurred before arming is not guaranteed to be caught.
 - Normal pin reads report 0/1, never high impedance.
 - Any **taken** non-LOOP branch clears the active loop state. This prohibits conditional flow inside a live loop in v1 (except fall-through conditions).
@@ -92,13 +92,24 @@ Status: **UART-capable implementation proposal** (not yet verified in RTL). This
 - I2C logical high is represented by RELEASE plus an **external pull-up**, not an actively driven 1.
 
 ### `110 MOVE` group (1 or 2 bytes)
-- Byte 0: `[7:5]=110`, `[4]=destination/compare register`, `[3:2]=submode`, `[1:0]=00`.
-- `submode=00`: `MOV_IMM Rn, imm8`; two bytes; write Rn from second byte.
-- `submode=01`: `CMP_IMM Rn, imm8`; two bytes; set `eq_flag = (Rn == imm8)`.
-- `submode=10`: `MOV_REG Rn, Rother`; one byte; copy the other 8-bit data register into Rn.
-- `submode=11`: `CMP_REG Rn, Rother`; one byte; set `eq_flag = (Rn == Rother)`.
-- MOV does not affect equality flag. CMP does not modify data registers. `eq_flag` resets to 0.
-- A simple equality comparator is required, **not** a general arithmetic ALU.
+
+- Byte 0: `[7:5]=110`, `[4]=destination/compare register`, `[3:2]=submode`.
+- MOV requires `[1:0]=00`; other MOV low fields are reserved.
+- `submode=00`: `MOV_IMM Rn, imm8`; two bytes; write Rn from the second byte.
+- `submode=01`: `CMP_IMM Rn, imm8, op`; two bytes; compare A=Rn with B=the second byte.
+- `submode=10`: `MOV_REG Rn, Rother`; one byte; copy the opposite register into Rn.
+- `submode=11`: `CMP_REG Rn, Rother, op`; one byte; compare A=Rn with B=the opposite register.
+
+| CMP `[1:0]` | Operation | Result written to `cmp_flag` |
+|---|---|---|
+| `00` | EQ | A == B |
+| `01` | unsigned LT | A < B |
+| `10` | unsigned GT | A > B |
+| `11` | Reserved | Preserve flag; instruction does not complete |
+
+MOV preserves `cmp_flag`; CMP preserves R0/R1. The flag resets to zero and holds across all non-CMP instructions. A legal CMP writes it at the rising edge completing EXECUTE. Selected-register order matters for LT/GT. EQ/LT/GT are byte comparisons; there is no general arithmetic ALU.
+
+Future `BR_TRUE`/`BR_FALSE` test this Boolean result without changing the branch encoding. Older BR_EQ/BR_NE mnemonics describe only equality-based use; they are not implemented assembler aliases in this repository.
 
 ### `111 DATA_IO` group (1 byte)
 - Byte 0: `[7:5]=111`, `[4]=reg`, `[3]=mode`, `[2:0]=000`.
@@ -109,9 +120,9 @@ Status: **UART-capable implementation proposal** (not yet verified in RTL). This
 
 ## PC and execution timing — UART v1 contract
 
-- `FETCH_OPCODE`: read `mem[PC]`, latch opcode and first-byte fields (one system-clock cycle).
+- `FETCH`: read `mem[PC]`, latch opcode and first-byte fields (one system-clock cycle).
 - If the opcode+submode requires a second byte: `FETCH_OPERAND`: read `mem[PC+1]`, latch extension (one cycle).
-- `EXECUTE`: perform the instruction and update the PC (one cycle for ordinary instructions; WAIT/WAIT_PIN/DATA_IO can extend the EXECUTE state).
+- `EXECUTE`: perform the instruction and update PC on completion. For WAIT with D>1, its first execution cycle enters `WAIT_REMAIN` for the remaining D-1 cycles. Future WAIT_PIN/DATA_IO can stall in EXECUTE.
 - Thus a nonblocking 1-byte instruction consumes **2 cycles** and a nonblocking 2-byte instruction **3 cycles**, including fetch.
 - For `WAIT D`, EXECUTE lasts exactly D cycles (not D cycles plus one EXECUTE cycle). Fetch of WAIT still consumes one extra cycle. For waiting on a pin, EXECUTE lasts until the condition is satisfied, with at least one EXECUTE cycle.
 - Ordinary register/flag/GPIO effects commit on the last EXECUTE clock edge. For branches/loops, PC updates on that edge.
@@ -122,7 +133,7 @@ Status: **UART-capable implementation proposal** (not yet verified in RTL). This
 ## Reset
 
 - Synchronous, active-high `rst` for first RTL implementation (reset style can be adapted at the Tiny Tapeout wrapper).
-- `PC=0`, `R0=0`, `R1=0`, `T=4`, `shift_dir=RIGHT`, `eq_flag=0`, `loop_active=0`, `loop_remaining=0`.
+- `PC=0`, `R0=0`, `R1=0`, `T=4`, `shift_dir=RIGHT`, `cmp_flag=0`, `loop_active=0`, `loop_remaining=0`.
 - GPIO outputs default **high-Z** (`oe=0`). UART firmware must drive TX high before sending.
 - Host mailboxes initially invalid/empty. Wait counter cleared; execution starts at PC0 after reset.
 - Two-flop synchronizer per input pin; branch and shift operations read synchronized values only.
@@ -192,7 +203,7 @@ For early RTL simulation, memory may use `$readmemh` and the host mailbox may be
 - One processor executes one instruction at a time; no simultaneous independent UART TX and RX engines.
 - One active loop and no nested loops; taken conditional branches abort loop state.
 - No arithmetic, masking, general-purpose data RAM, parity/CRC acceleration, interrupt system, or DMA.
-- With only equality comparison, more sophisticated protocol-state logic may need added instructions later.
+- Comparisons support EQ and unsigned LT/GT only; signed arithmetic and general arithmetic instructions are absent.
 - Edge waits can miss events that happen before the instruction is armed; no edge FIFO in v1.
 - Maximum WAIT_C period is 8191 clocks; longer waits can be synthesized in firmware, including LOOP, with instruction overhead.
 - Higher-speed SPI and special I2C behavior may be limited by the number of instructions needed per bit.
@@ -204,17 +215,21 @@ For early RTL simulation, memory may use `$readmemh` and the host mailbox may be
 3. `SHIFT_OUT R0` right eight times emits `1,0,1,0,0,1,0,1`.
 4. `SHIFT_IN R1` right while receiving those eight bits yields R1=`0xA5`.
 5. `LOOP 8,target` executes the body exactly eight times, including the first pass.
-6. `PIN_CTRL` correctly handles low/high, rising/falling, conditional branch, unconditional jump, EQ and NE conditions.
+6. `PIN_CTRL` correctly handles low/high, rising/falling, conditional branch, unconditional jump, true/false comparison-flag conditions.
 7. `PULL` and `PUSH` stall safely and each transfer exactly one byte on handshake.
 8. Reset releases protocol outputs; I2C-style released output is never misinterpreted as readable Z.
 9. UART TX meets chosen baud tolerance when cycles are measured **pin-edge to pin-edge**.
 10. UART RX samples at centers and recovers from a false start and framing error for the chosen supported baud.
 
-## Hardware bring-up order
+## Future hardware bring-up plan
 
-1. PC + 256-byte test program + FETCH_OPCODE/FETCH_OPERAND/EXECUTE FSM; implement MOV_IMM and JMP first.
+1. Integrate the existing `pc`, `inst_fetch`, controller, timer, shift/MOVE datapath and comparator in `protocol_core`; verify MOV followed by CMP and instruction-driven GPIO timing.
 2. R0/R1 + SHIFT_OUT + GPIO value/output-enable; send a fixed UART start/data/stop pattern.
 3. WAIT_C + WAIT + LOOP; transmit a whole byte using UART firmware.
 4. PIN_CTRL + input synchronizers + SHIFT_IN; receive UART bytes.
-5. CMP/BR_EQ/BR_NE, DATA_IO mailboxes and host testbench drivers.
+5. CMP/BR_TRUE/BR_FALSE, DATA_IO mailboxes and host testbench drivers.
 6. Assemble complete UART programs, run waveform assertions and random test vectors, then synthesize early.
+
+## Current illegal-instruction behavior
+
+The controller holds PC and remains in EXECUTE for reserved or unsupported encodings, with all write strobes low. It has no `illegal_inst` output or trap mechanism. Length predecode is independent of legality: reserved immediate encodings still fetch the second byte before stalling. PIN_CTRL, LOOP, and DATA_IO have length decoding but no execution implementation yet.

@@ -1,8 +1,8 @@
 # Protocol Emulator ASIC — `LOOP`, `PIN_CTRL`, and `DATA_IO` Microarchitecture
 
-**Status:** Proposed implementation and two-person collaboration contract; **not yet RTL-verified**  
-**ISA reference:** `protocol_emulator_ISA_v1_proposed(2).md` (UART-capable v1.0 proposal)  
-**Previous milestone:** `README_WAIT_WAIT_C_microarchitecture.md`  
+**Status:** Future instruction-family proposal. PIN_CTRL, LOOP, and DATA_IO have length decoding only; their execution logic, mailboxes and tests are not implemented.
+**ISA reference:** `protocol_emulator_ISA_v1_proposed.md` (current EQ/LT/GT encoding reference)
+**Previous milestone:** `Protocol_Emulator_WAIT_WAIT_C_Microarchitecture_v1_1.md`
 **Processor:** 8-bit byte-addressed PC, 256 × 8 instruction memory, non-pipelined multicycle execution, R0/R1 (8 bits)
 
 > **Important:** This document retains the *existing* ISA and instruction-retirement convention. It does not redefine the already-implemented PC, IR/IMM, register file, or WAIT timer. In the evolving RTL repository, keep the existing file/module names (e.g. `pc.sv`, `pc_sel`), rather than creating duplicate state solely to match names in this proposal. Interface names below are a **proposed integration contract** to agree on before parallel coding.
@@ -12,7 +12,7 @@
 Implement three instruction families:
 
 - **`LOOP` (`011`)** — a single hardware counter for bottom-tested loops.
-- **`PIN_CTRL` (`010`)** — `WAIT_PIN` low/high/rising/falling, `BRANCH_PIN` low/high, `JMP`, `BR_EQ`, and `BR_NE`.
+- **`PIN_CTRL` (`010`)** — `WAIT_PIN` low/high/rising/falling, `BRANCH_PIN` low/high, `JMP`, `BR_TRUE`, and `BR_FALSE`.
 - **`DATA_IO` (`111`)** — blocking `PULL` and `PUSH` between R0/R1 and two host mailboxes.
 
 ### Recommended two-person split
@@ -20,7 +20,7 @@ Implement three instruction families:
 | Owner | Functional scope | Owns/changes | Does **not** own |
 |---|---|---|---|
 | **Person A — control flow** | `LOOP`, all `PIN_CTRL` submodes, PC-target selection, instruction-length decode, loop abort on taken branch, multi-cycle `WAIT_PIN` handling | Existing instruction-controller/FSM and PC integration, loop state and pin-wait state, synchronizer interface, A's standalone tests | Host mailbox registers, host UART RX/TX |
-| **Person B — data movement / host I/O** | Two one-entry 8-bit mailboxes, `PULL`/`PUSH` ready/valid transaction logic, host test drivers, optional dedicated host UART RX/TX | `data_mailboxes.sv`, optionally `host_uart_rx.sv`, `host_uart_tx.sv`, B's standalone tests | PC, instruction-fetch FSM, R0/R1 storage, opcode decoding |
+| **Person B — data movement / host I/O** | Two one-entry 8-bit mailboxes, `PULL`/`PUSH` ready/valid transaction logic, host test drivers, optional dedicated host UART RX/TX | `data_mailboxes.sv`, optionally `host_uart_rx.sv`, `host_uart_tx.sv`, B's standalone tests | PC, instruction-fetch FSM and opcode decoding; mailbox modules must reuse the existing B-owned R0/R1 bank |
 | **A + B together** | Wire the controller's `DATA_IO` request to B's handshake; register-file writeback; full-program regression; optional UART demo | Core/top-level connection changes agreed during integration | Independent simultaneous edits to the same controller/top-level files |
 
 **Why this split?** `LOOP` and `PIN_CTRL` both redirect PC and belong with the existing sequencer. `DATA_IO` has a clean external interface and substantial independently testable logic. Person B implements the *storage and handshake*, while Person A makes the sequencer wait for a successful handshake. This avoids both persons editing the instruction controller simultaneously.
@@ -33,7 +33,7 @@ Implement three instruction families:
 
 The prior WAIT milestone established:
 
-1. `FETCH_OPCODE`: fetch `mem[PC]` into `IR`; PC **holds**.
+1. `FETCH`: fetch `mem[PC]` into `IR`; PC **holds**.
 2. If two bytes: `FETCH_OPERAND`: fetch `mem[PC+1]` into `IMM`; PC **holds**.
 3. `EXECUTE`: perform the operation; the instruction updates PC **only upon retirement**.
 4. A nonblocking one-byte instruction costs **2 clocks total** (fetch + execute); a nonblocking two-byte instruction costs **3 clocks total** (fetch opcode + fetch operand + execute).
@@ -61,7 +61,7 @@ Two-byte instructions are `WAIT_C (000)`, `PIN_CTRL (010)` **when `IR[0]=0`**, `
 | `PULL`/`PUSH` | mailbox not ready | No | Hold | Hold |
 | `PULL`/`PUSH` | handshake succeeds | Yes | `PC + 1` | Hold |
 
-All arithmetic is 8-bit; assembler must prevent an instruction crossing memory end or a target pointing into an immediate byte. The PC changes on the **ending rising edge** of the retire cycle.
+All arithmetic is 8-bit; assembler must prevent an instruction crossing memory end or a target pointing into an immediate byte. The PC changes on the **ending rising edge** of the completion cycle; current RTL has no separate `retire` output.
 
 ---
 
@@ -139,7 +139,7 @@ Suggested internal control signals: `loop_execute`, `loop_encoded_count[4:0]`, `
 
 - `N=1`, `N=2`, `N=3`, `N=31`, encoded `N=0` (32); check **total** body visits.
 - Loop target different from current PC; check byte addresses and `PC+2` fall-through.
-- Taken `BRANCH_PIN`, `JMP`, `BR_EQ`, `BR_NE` abort active loop; untaken branch leaves it intact.
+- Taken `BRANCH_PIN`, `JMP`, `BR_TRUE`, `BR_FALSE` abort active loop; untaken branch leaves it intact.
 - Reset mid-loop clears state; no PC update occurs before retirement.
 - Verify `LOOP` consumes exactly three clocks per encounter, with no extra countdown cycle.
 
@@ -165,11 +165,11 @@ mode=0: branch, 2 bytes, IMM is absolute target
   condition=00: BRANCH_PIN pin, LOW, IMM
   condition=01: BRANCH_PIN pin, HIGH, IMM
   condition=10: JMP IMM; pin bits ignored
-  condition=11: IR[4] must be 0; IR[3]=0 -> BR_EQ IMM;
-                              IR[3]=1 -> BR_NE IMM
+  condition=11: IR[4] must be 0; IR[3]=0 -> BR_TRUE IMM;
+                              IR[3]=1 -> BR_FALSE IMM
 ```
 
-**Reserved:** `mode=0`, `condition=11`, `IR[4]=1`. Trap/assert as illegal under the existing illegal-instruction policy; do not silently treat it as `BR_NE` or `JMP`.
+**Reserved:** `mode=0`, `condition=11`, `IR[4]=1`. The future decoder must reject this encoding; current reserved instructions stall without writes and have no trap/fault output; do not silently treat it as `BR_FALSE` or `JMP`.
 
 ### 4.2 Pin input datapath
 
@@ -201,11 +201,11 @@ Combinational branch-taken equations using the value visible **before** the EXEC
 BR_LOW:  taken = (selected_pin_sync == 1'b0)
 BR_HIGH: taken = (selected_pin_sync == 1'b1)
 JMP:     taken = 1'b1
-BR_EQ:   taken = eq_flag
-BR_NE:   taken = !eq_flag
+BR_TRUE:   taken = cmp_flag
+BR_FALSE:   taken = !cmp_flag
 ```
 
-`eq_flag` is persistent state last written by `CMP_IMM`/`CMP_REG`; MOV does not modify it. For `BR_EQ` and `BR_NE`, ignore pin data. On taken branch: `next_pc=IMM` **and clear loop state**. Otherwise `next_pc=PC+2`. Branches finish in **3 clocks total**.
+`cmp_flag` is the persistent Boolean EQ/unsigned LT/unsigned GT result last written by `cmp_datapath` on CMP; MOV does not modify it. It is not an equality-only flag. For `BR_TRUE` and `BR_FALSE`, ignore pin data. On taken branch: `next_pc=IMM` **and clear loop state**. Otherwise `next_pc=PC+2`. Branches finish in **3 clocks total**.
 
 ### 4.4 Level waits (1 byte)
 
@@ -239,7 +239,7 @@ This intentionally requires at least **two EXECUTE cycles** for an edge wait (on
 - All 4 pins and all 4 WAIT conditions; immediately satisfied level and delayed level.
 - Rising and falling edge **after** arming succeed; a transition **before** arming alone does not satisfy the wait.
 - `BR_LOW`/`BR_HIGH` both taken and not taken; `JMP` independent of pin.
-- EQ and NE for `eq_flag=0/1`; no unwanted flag modifications.
+- True and false branches for `cmp_flag=0/1`; no unwanted flag modifications.
 - Reserved encoding is illegal; correct one-byte/two-byte decode and PC fall-through.
 - Hold PC/IR while waiting, no repeated side effects, loop clears only for **taken** branches.
 
@@ -342,7 +342,7 @@ Use one sequential `always_ff` for each mailbox or an equivalent clear-priority 
 
 **PUSH:** while `EXECUTE && DATA_IO && mode==PUSH`, drive `core_push_data` from the IR-selected register and assert `core_push_valid=1`. If `core_push_ready=0`, **do not retire** or alter the register; hold register data stable while blocked. If ready, write output mailbox and retire on the **same edge** with `PC+1`.
 
-Core datapath must use **the existing R0/R1 storage**. Mailboxes must not instantiate a second copy of the register file. `PULL` shares register-file write arbitration with `MOVE`/`SHIFT_IN`/`SHIFT_OUT` (only one instruction executes at a time). A `PUSH` reads the selected register and does not change it. Illegal `IR[2:0]` must not trigger any mailbox or RF side effect.
+Core datapath must use **the existing R0/R1 storage**. Mailboxes must not instantiate a second copy of the register file. `PULL` will share register-file write arbitration with `MOVE`/`SHIFT_IN`/`SHIFT_OUT` (only one instruction executes at a time). A `PUSH` reads the selected register and does not change it. Illegal `IR[2:0]` must not trigger any mailbox or RF side effect.
 
 **No repeated transfers:** as soon as a PULL/PUSH succeeds, the FSM leaves EXECUTE and the request deasserts. Do not create a sticky `data_io_done` that lasts an extra EXECUTE clock. The mailboxes see exactly one clock of valid transaction per retiring `DATA_IO` instruction.
 
@@ -430,9 +430,9 @@ Person B's standalone module is the **only** owner of both mailbox data register
 ```text
 rtl/
   pc.sv                     # Existing PC (A owns required integration)
-  <existing_controller>.sv  # A: decode, retire, PC mux, loop/pin control, DATA_IO gating
+  control_unit.sv           # A: decode, pc_sel, loop/pin control, DATA_IO gating
   loop_unit.sv              # Optional A-only extraction for 6 loop state bits
-  pin_sync.sv               # A (or existing GPIO owner): 2-flop synchronizers, shared
+  shift_datapath.sv          # Existing B-owned GPIO sync and sole RF writeback owner
   data_mailboxes.sv         # B: two independent 1-entry mailboxes
   host_uart_rx.sv           # B: optional later milestone
   host_uart_tx.sv           # B: optional later milestone
@@ -449,7 +449,7 @@ docs/
   README_LOOP_PIN_CTRL_DATA_IO_microarchitecture.md
 ```
 
-`<...>` indicates a **placeholder for the repository's actual filename**, not a file to create literally. Keep the existing `rtl/` and `tb/` conventions and existing `pkg.sv` field definitions; avoid duplicating opcode bit positions as conflicting local constants.
+`<...>` indicates a **placeholder for the repository's actual filename**, not a file to create literally. Keep the existing `rtl/` and `tb/` conventions and existing `isa_pkg.sv` field definitions; avoid duplicating opcode bit positions as conflicting local constants.
 
 ### 6.4 Person-by-person pre-merge deliverables
 
@@ -461,11 +461,11 @@ docs/
 
 ### 6.5 Merge plan
 
-1. Agree on the proposed port list and `pc_write_en`/retirement semantics in a small shared commit.
+1. Agree on the proposed port list and `pc_sel`/retirement semantics in a small shared commit.
 2. Branch A: `feat/loop-pin-control`; branch B: `feat/data-mailboxes`.
 3. Independently compile unit TBs and run directed tests; neither branch modifies the other's RTL files.
 4. Review and merge A and B, then make one **joint integration PR** for shared controller/top-level wiring (or A owns controller changes reviewed by B).
-5. Capture waveforms for `PC`, `IR`, `IMM`, FSM state, `retire`, `loop_active`, `loop_remaining`, synchronized pins, `edge_armed`, `eq_flag`, mailbox valid/data, and core/host handshakes.
+5. Capture waveforms for `PC`, `IR`, `IMM`, FSM state, PC completion selection (a future `retire` signal if added), `loop_active`, `loop_remaining`, synchronized pins, `edge_armed`, `cmp_flag`, mailbox valid/data, and core/host handshakes.
 6. Only after the core passes, add physical host UART and program-loader work; check I/O pin budget and synthesis area.
 
 ---
@@ -479,7 +479,7 @@ docs/
 | L3 | Taken vs untaken `BRANCH_PIN` in a loop | Only taken branch aborts active loop; target selection correct |
 | P1 | Wait for P0 high/low | Immediate/delayed completion; PC held while blocking |
 | P2 | Rising/falling transition before vs after arm | Pre-arm edge does not satisfy the wait; post-arm edge does |
-| P3 | `BR_EQ`/`BR_NE`, `JMP` | Correct flag semantics, legal/reserved decode and 3-cycle path |
+| P3 | `BR_TRUE`/`BR_FALSE`, `JMP` | Correct flag semantics, legal/reserved decode and 3-cycle path |
 | D1 | Empty mailbox → host writes 0xA5 → `PULL R0` | Core stalls first; R0=0xA5 and input entry consumed exactly once |
 | D2 | `PUSH R0` while output full → host reads | Core waits, then pushes once and retires; no byte duplicates |
 | D3 | Host sends 0x41 → PULL → programmable UART TX | Protocol pin emits correct UART frame after firmware timing calibration |
@@ -493,7 +493,7 @@ Check **cycle counts at instruction retirement edges**, not just functional outp
 - [ ] Existing PC is the sole PC owner; updates occur only on retirement.
 - [ ] `LOOP` count is **total body passes** with encoded zero meaning 32; only one live loop.
 - [ ] Taken non-LOOP branches clear `loop_active` and `loop_remaining`.
-- [ ] `PIN_CTRL` mode determines 1-byte versus 2-byte length; reserved `BR_EQ/BR_NE` encoding is rejected.
+- [ ] `PIN_CTRL` mode determines 1-byte versus 2-byte length; reserved `BR_TRUE/BR_FALSE` encoding is rejected.
 - [ ] Edge wait arms inside EXECUTE; no pre-arm edge detection.
 - [ ] One shared two-flop input synchronizer per physical pin, not one per instruction.
 - [ ] Mailboxes are **single entry** for the first integrated RTL milestone, with ready/valid semantics.
