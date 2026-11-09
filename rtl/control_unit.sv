@@ -3,11 +3,14 @@ module control_unit (
     input   logic [7:0]   pc_value,
     input   logic         clk,
     input   logic         reset,
-    input   logic         wait_done,
+    input   logic         wait_is_single_cycle,
+    input   logic         wait_is_last_cycle,
 
     output  logic         wait_start,
-    output  logic         wait_config_U,
-    output  logic         wait_config_L,
+    output  logic         wait_c_write,
+    output  logic [12:0]  t_write_data,
+    output  logic [1:0]   wait_mode,
+    output  logic         wait_tick,
     output  logic [1:0]   pc_sel,
     output  logic [7:0]   inst_addr,
     output  logic         direction
@@ -51,6 +54,9 @@ module control_unit (
                       ? pc_value + PC_WIDTH'(ONE_BYTE)
                       : pc_value;
 
+    assign t_write_data = {ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm};
+    assign wait_mode = ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB];
+
     always_ff @(posedge clk) begin
         if (reset == 1) begin
             state <= FETCH;
@@ -82,8 +88,8 @@ module control_unit (
         next_state = state;
 
         wait_start = 1'b0;
-        wait_config_U = 1'b0;
-        wait_config_L = 1'b0;
+        wait_c_write = 1'b0;
+        wait_tick = 1'b0;
         pc_sel = PC_HOLD;
 
         if (!reset) begin
@@ -94,27 +100,18 @@ module control_unit (
                         next_state = FETCH_OPERAND;
                     else
                         next_state = EXECUTE;
-
-                    //WAIT_C
-                    if(inst[OPCODE_MSB:OPCODE_LSB] == OP_WAIT_C) begin
-                        wait_config_U = 1;
-                    end
                 end
 
                 FETCH_OPERAND: begin
                     next_state = EXECUTE;
-
-                    //WAIT_C
-                    if(ir[OPCODE_MSB:OPCODE_LSB] == OP_WAIT_C) begin
-                        wait_config_L = 1;
-                    end
                 end
 
                 EXECUTE: begin
 
                     //WAIT_C
                     if(ir[OPCODE_MSB:OPCODE_LSB] == OP_WAIT_C) begin
-                        if ({ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm} != '0) begin
+                        if (t_write_data != '0) begin
+                            wait_c_write = 1'b1;
                             pc_sel = PC_PLUS_2;
                             next_state = FETCH;
                         end
@@ -133,8 +130,8 @@ module control_unit (
                         //WAIT
                         else if(ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB] != SET_DIR &&
                                 ir[WAIT_ARG_MSB:WAIT_ARG_LSB] == WAIT_ARG_REQUIRED) begin
-                            wait_start = 1;
-                            if(wait_done == 1) begin
+                            wait_start = 1'b1;
+                            if(wait_is_single_cycle) begin
                                 pc_sel = PC_PLUS_1;
                                 next_state = FETCH;
                             end
@@ -146,12 +143,10 @@ module control_unit (
                 end
 
                 WAIT_REMAIN: begin
-                    if(wait_done == 1) begin
+                    wait_tick = 1'b1;
+                    if(wait_is_last_cycle) begin
                         pc_sel = PC_PLUS_1;
                         next_state = FETCH;
-                    end
-                    else begin
-                        next_state = WAIT_REMAIN;
                     end
                 end
 
