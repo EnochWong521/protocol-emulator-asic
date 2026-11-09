@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-// Steps 5-8: fetch addressing, lengths, completion updates, and timer commands.
+// Fetch addressing, lengths, completion updates, timer commands, and SHIFT decode.
 // Run from the repository root:
 // iverilog -g2012 -s tb_control_unit_fetch -o /tmp/tb_control_unit_fetch.vvp \
 //   rtl/isa_pkg.sv rtl/pc.sv rtl/control_unit.sv tb/tb_control_unit_fetch.sv
@@ -22,6 +22,8 @@ module tb_control_unit_fetch;
     };
     // Bits 0, 8, 16, 24, 25: WAIT FULL/HALF/QUARTER and SET_DIR RIGHT/LEFT.
     localparam logic [31:0] LEGAL_WAIT_ENCODINGS = 32'h03010101;
+    // Every fourth SHIFT_IN encoding is legal: its low two bits must be zero.
+    localparam logic [31:0] LEGAL_SHIFT_IN_ENCODINGS = 32'h11111111;
 
     logic clk = 1'b0;
     logic reset = 1'b1;
@@ -33,10 +35,14 @@ module tb_control_unit_fetch;
     wire wait_start, wait_c_write, wait_tick, direction;
     wire [T_WIDTH-1:0] t_write_data;
     wire [1:0] wait_mode;
+    wire exec_shift_in, exec_shift_out, reg_sel;
+    wire [1:0] pin_sel, shift_out_mode;
     logic [INST_WIDTH-1:0] memory [0:255];
     int checked_cycles = 0;
     int one_byte_cases = 0;
     int two_byte_cases = 0;
+    int shift_in_cases = 0;
+    int shift_out_cases = 0;
 
     always #5 clk = ~clk;
     assign inst = memory[inst_addr];
@@ -52,7 +58,9 @@ module tb_control_unit_fetch;
         .wait_is_last_cycle(wait_is_last_cycle),
         .wait_start(wait_start), .wait_c_write(wait_c_write),
         .t_write_data(t_write_data), .wait_mode(wait_mode), .wait_tick(wait_tick),
-        .direction(direction)
+        .direction(direction),
+        .exec_shift_in(exec_shift_in), .exec_shift_out(exec_shift_out),
+        .reg_sel(reg_sel), .pin_sel(pin_sel), .shift_out_mode(shift_out_mode)
     );
 
     task automatic reset_case(input logic [7:0] first_byte,
@@ -68,7 +76,7 @@ module tb_control_unit_fetch;
             dut.ir !== 0 || dut.imm !== 0 || direction !== DIR_RIGHT)
             $fatal(1, "reset failed");
         if (pc_sel !== PC_HOLD ||
-            {wait_start, wait_c_write, wait_tick} !== 3'b000)
+            {wait_start, wait_c_write, wait_tick, exec_shift_in, exec_shift_out} !== 5'b00000)
             $fatal(1, "control strobe during reset");
         @(negedge clk);
         reset = 1'b0;
@@ -80,7 +88,9 @@ module tb_control_unit_fetch;
                          input logic expected_start,
                          input logic [1:0] expected_sel = PC_HOLD,
                          input logic [7:0] expected_pc_after = 0,
-                         input logic expected_write = 1'b0);
+                         input logic expected_write = 1'b0,
+                         input logic expected_shift_in = 1'b0,
+                         input logic expected_shift_out = 1'b0);
         logic [7:0] expected_ir, expected_imm;
         #1;
         if (dut.state !== before_state || inst_addr !== expected_addr)
@@ -90,6 +100,12 @@ module tb_control_unit_fetch;
             $fatal(1, "PC selection or WAIT start incorrect");
         if (wait_c_write !== expected_write || wait_tick !== (before_state == dut.WAIT_REMAIN))
             $fatal(1, "timer write/tick command incorrect");
+        if (exec_shift_in !== expected_shift_in || exec_shift_out !== expected_shift_out)
+            $fatal(1, "SHIFT execution strobe incorrect");
+        if ((expected_shift_in || expected_shift_out) &&
+            (reg_sel !== memory[0][4] || pin_sel !== memory[0][3:2] ||
+             shift_out_mode !== memory[0][1:0]))
+            $fatal(1, "SHIFT register/pin/mode decoding incorrect");
         expected_ir = (before_state == dut.FETCH) ? memory[expected_addr] : dut.ir;
         expected_imm = (before_state == dut.FETCH_OPERAND) ? memory[expected_addr] : dut.imm;
         @(posedge clk); #1;
@@ -97,6 +113,8 @@ module tb_control_unit_fetch;
             $fatal(1, "state transition or PC completion update incorrect");
         if (dut.ir !== expected_ir || dut.imm !== expected_imm)
             $fatal(1, "instruction capture/retention incorrect");
+        if (after_state == dut.FETCH && {exec_shift_in, exec_shift_out} !== 2'b00)
+            $fatal(1, "SHIFT strobe persisted after completion");
         checked_cycles++;
     endtask
 
@@ -155,15 +173,28 @@ module tb_control_unit_fetch;
                 one_byte_cases++;
             end
 
-            // Unsupported opcodes and reserved WAIT/SET_DIR encodings hold PC.
-            if (byte_value >= 64 ||
-                (byte_value >= 32 && byte_value < 64 &&
-                 !LEGAL_WAIT_ENCODINGS[byte_value - 32]))
+            if (byte_value >= 128 && byte_value < 160 &&
+                LEGAL_SHIFT_IN_ENCODINGS[byte_value - 128]) begin
+                cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_1, 8'd1, 0, 1, 0);
+                shift_in_cases++;
+            end
+            else if (byte_value >= 160 && byte_value < 192) begin
+                cycle(dut.EXECUTE, dut.FETCH, 8'd0, 0, PC_PLUS_1, 8'd1, 0, 0, 1);
+                shift_out_cases++;
+            end
+            // Unsupported opcodes and reserved encodings hold without writes.
+            else if (byte_value >= 64 ||
+                     (byte_value >= 32 && byte_value < 64 &&
+                      !LEGAL_WAIT_ENCODINGS[byte_value - 32]))
                 cycle(dut.EXECUTE, dut.EXECUTE, 8'd0, 0);
         end
 
         if (one_byte_cases != 160 || two_byte_cases != 96)
             $fatal(1, "length coverage totals incorrect");
+        if (shift_in_cases != 8 || shift_out_cases != 32)
+            $fatal(1, "SHIFT decode coverage incomplete");
+        $display("PASS: %0d SHIFT_IN and %0d SHIFT_OUT encodings; reserved SHIFT_IN held",
+                 shift_in_cases, shift_out_cases);
         $display("PASS: %0d one-byte and %0d two-byte encodings; %0d cycle checks",
                  one_byte_cases, two_byte_cases, checked_cycles);
         $finish;

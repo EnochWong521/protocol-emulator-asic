@@ -13,7 +13,12 @@ module control_unit (
     output  logic         wait_tick,
     output  logic [1:0]   pc_sel,
     output  logic [7:0]   inst_addr,
-    output  logic         direction
+    output  logic         direction,
+    output  logic         exec_shift_in,
+    output  logic         exec_shift_out,
+    output  logic         reg_sel,
+    output  logic [1:0]   pin_sel,
+    output  logic [1:0]   shift_out_mode
 );
 
     import isa_pkg::*;
@@ -57,6 +62,11 @@ module control_unit (
     assign t_write_data = {ir[WAIT_C_T_UPPER_MSB:WAIT_C_T_UPPER_LSB], imm};
     assign wait_mode = ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB];
 
+    // SHIFT_IN and SHIFT_OUT share register/pin field positions.
+    assign reg_sel = ir[SHIFT_IN_REG_BIT];
+    assign pin_sel = ir[SHIFT_IN_PIN_MSB:SHIFT_IN_PIN_LSB];
+    assign shift_out_mode = ir[SHIFT_OUT_MODE_MSB:SHIFT_OUT_MODE_LSB];
+
     always_ff @(posedge clk) begin
         if (reset == 1) begin
             state <= FETCH;
@@ -90,6 +100,8 @@ module control_unit (
         wait_start = 1'b0;
         wait_c_write = 1'b0;
         wait_tick = 1'b0;
+        exec_shift_in = 1'b0;
+        exec_shift_out = 1'b0;
         pc_sel = PC_HOLD;
 
         if (!reset) begin
@@ -139,6 +151,18 @@ module control_unit (
                                 next_state = WAIT_REMAIN;
                             end
                         end
+                    end
+                    else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_SHIFT_IN) begin
+                        if (ir[SHIFT_IN_RSVD_MSB:SHIFT_IN_RSVD_LSB] == SHIFT_IN_RSVD_REQUIRED) begin
+                            exec_shift_in = 1'b1;
+                            pc_sel = PC_PLUS_1;
+                            next_state = FETCH;
+                        end
+                    end
+                    else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_SHIFT_OUT) begin
+                        exec_shift_out = 1'b1;
+                        pc_sel = PC_PLUS_1;
+                        next_state = FETCH;
                     end
                 end
 

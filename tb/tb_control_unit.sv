@@ -58,7 +58,12 @@ module tb_control_unit;
         .wait_tick(wait_tick),
         .pc_sel(pc_sel),
         .inst_addr(inst_addr),
-        .direction(direction)
+        .direction(direction),
+        .exec_shift_in(),
+        .exec_shift_out(),
+        .reg_sel(),
+        .pin_sel(),
+        .shift_out_mode()
     );
 
     //clock
