@@ -9,11 +9,12 @@ module tb_pc;
     logic clk = 1'b0;
     logic reset = 1'b1;
     logic [1:0] pc_sel = PC_HOLD;
+    logic [PC_WIDTH-1:0] pc_target = 8'h01;
     wire [PC_WIDTH-1:0] pc;
     int checked_steps = 0;
 
     always #5 clk = ~clk;
-    pc dut (.clk(clk), .reset(reset), .pc_sel(pc_sel), .pc(pc));
+    pc dut (.clk(clk), .reset(reset), .pc_sel(pc_sel), .pc_target(pc_target), .pc(pc));
 
     task automatic step(input logic [1:0] selection,
                         input logic [PC_WIDTH-1:0] expected_pc);
@@ -48,7 +49,7 @@ module tb_pc;
         for (int i = 1; i <= 128; i++)
             step(PC_PLUS_2, PC_WIDTH'(1 + 2*i));
         step(PC_HOLD, 8'h01);
-        step(2'b11, 8'h01); // Reserved future-target selector must hold.
+        step(PC_TARGET, 8'h01); // Target selection now loads pc_target.
 
         // Synchronous reset has priority over an increment selection.
         @(negedge clk);

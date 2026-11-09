@@ -71,7 +71,7 @@ WAIT arguments `[2:0]` must be zero. SET_DIR requires `[2:1]=00` and uses bit ze
 
 WAIT_C configures a generic system-clock period, not a dedicated UART clock. Valid T is 1 through 8191. Zero is reserved: the controller stalls without writing T or advancing PC. The timer trusts legal controller strobes; it does not independently validate T.
 
-Length decoding is separate from execution legality. Two-byte encodings are WAIT_C, LOOP, PIN_CTRL with mode bit zero, and MOVE submodes MOV_IMM/CMP_IMM. Reserved immediate encodings still fetch an operand before execution stalls. PIN_CTRL, LOOP and DATA_IO execution remain future work.
+Length decoding is separate from execution legality. Two-byte encodings are WAIT_C, LOOP, PIN_CTRL with mode bit zero, and MOVE submodes MOV_IMM/CMP_IMM. Reserved immediate encodings still fetch an operand before execution stalls. PIN_CTRL and LOOP execution are now implemented in the controller; DATA_IO remains future work. Top-level integration and new instruction verification are deferred.
 
 ## 3. Four-state controller and PC selection
 
@@ -89,9 +89,9 @@ Length decoding is separate from execution legality. Two-byte encodings are WAIT
 | PC_HOLD = 00 | Hold |
 | PC_PLUS_1 = 01 | PC + 1 |
 | PC_PLUS_2 = 10 | PC + 2 |
-| 11 | Reserved; currently hold |
+| PC_TARGET = 11 | Load pc_target (saved IMM) |
 
-Arithmetic wraps modulo 256. Firmware/assembler must avoid instructions crossing the image end or targeting operand bytes. Future branch support requires a target input/selection; it is not implemented. Completion/retirement means the final execution edge, not an additional state or register.
+Arithmetic wraps modulo 256. Firmware/assembler must avoid instructions crossing the image end or targeting operand bytes. Branch/LOOP support now uses PC_TARGET and the 8-bit pc_target input, to be connected directly to saved IMM. Completion/retirement means the final execution edge, not an additional state or register.
 
 ## 4. Timer edge contract
 

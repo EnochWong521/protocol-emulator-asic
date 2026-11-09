@@ -6,6 +6,9 @@ module control_unit (
     input   logic         reset,
     input   logic         wait_is_single_cycle,
     input   logic         wait_is_last_cycle,
+    input   logic [3:0]   gpio_in_sync, // Shared shift_datapath synchronizer output.
+    input   logic         gpio_sync_valid,
+    input   logic         cmp_flag,     // Persistent cmp_datapath result.
 
     output  logic         ir_load,
     output  logic         imm_load,
@@ -38,6 +41,15 @@ module control_unit (
 
     state_t state, next_state;
     logic inst_two_byte;
+    logic loop_active, next_loop_active;
+    logic [4:0] loop_remaining, next_loop_remaining;
+    logic edge_armed, next_edge_armed;
+    logic edge_prev, next_edge_prev;
+    logic selected_pin_sync;
+    logic branch_taken, branch_legal;
+
+    // PIN_CTRL uses IR[4:3], unlike the SHIFT pin field at IR[3:2].
+    assign selected_pin_sync = gpio_in_sync[ir[PIN_CTRL_PIN_MSB:PIN_CTRL_PIN_LSB]];
 
     // Length predecode uses the current fetch byte, independently of legality.
     always_comb begin
@@ -73,9 +85,17 @@ module control_unit (
         if (reset == 1) begin
             state <= FETCH;
             direction <= DIR_RIGHT;
+            loop_active <= 1'b0;
+            loop_remaining <= 5'd0;
+            edge_armed <= 1'b0;
+            edge_prev <= 1'b0;
         end
         else begin
             state <= next_state;
+            loop_active <= next_loop_active;
+            loop_remaining <= next_loop_remaining;
+            edge_armed <= next_edge_armed;
+            edge_prev <= next_edge_prev;
             // Register the direction only for a legal SET_DIR.
             if(state == EXECUTE &&
                ir[OPCODE_MSB:OPCODE_LSB] == OP_WAIT &&
@@ -88,6 +108,12 @@ module control_unit (
 
     always_comb begin
         next_state = state;
+        next_loop_active = loop_active;
+        next_loop_remaining = loop_remaining;
+        next_edge_armed = edge_armed;
+        next_edge_prev = edge_prev;
+        branch_taken = 1'b0;
+        branch_legal = 1'b0;
 
         wait_start = 1'b0;
         wait_c_write = 1'b0;
@@ -148,8 +174,101 @@ module control_unit (
                             end
                         end
                     end
+                    else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_LOOP) begin
+                        // The body has already run once. Zero encodes 32 total passes.
+                        next_state = FETCH;
+                        if (!loop_active) begin
+                            if (ir[LOOP_COUNT_MSB:LOOP_COUNT_LSB] == 5'd1) begin
+                                next_loop_active = 1'b0;
+                                next_loop_remaining = 5'd0;
+                                pc_sel = PC_PLUS_2;
+                            end
+                            else begin
+                                next_loop_active = 1'b1;
+                                next_loop_remaining =
+                                    (ir[LOOP_COUNT_MSB:LOOP_COUNT_LSB] == LOOP_COUNT_32_ENCODING)
+                                    ? 5'd31 : ir[LOOP_COUNT_MSB:LOOP_COUNT_LSB] - 5'd1;
+                                pc_sel = PC_TARGET;
+                            end
+                        end
+                        else if (loop_remaining > 5'd1) begin
+                            next_loop_remaining = loop_remaining - 5'd1;
+                            pc_sel = PC_TARGET;
+                        end
+                        else begin
+                            next_loop_active = 1'b0;
+                            next_loop_remaining = 5'd0;
+                            pc_sel = PC_PLUS_2;
+                        end
+                    end
+                    else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_PIN_CTRL) begin
+                        if (ir[PIN_CTRL_MODE_BIT] == PIN_WAIT_MODE && gpio_sync_valid) begin
+                            case (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB])
+                                PIN_WAIT_LOW, PIN_WAIT_HIGH: begin
+                                    if (selected_pin_sync ==
+                                        (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB] == PIN_WAIT_HIGH)) begin
+                                        pc_sel = PC_PLUS_1;
+                                        next_state = FETCH;
+                                        next_edge_armed = 1'b0;
+                                    end
+                                end
+
+                                PIN_WAIT_RISING, PIN_WAIT_FALLING: begin
+                                    // First valid EXECUTE sample establishes a baseline only.
+                                    next_edge_prev = selected_pin_sync;
+                                    if (!edge_armed) begin
+                                        next_edge_armed = 1'b1;
+                                    end
+                                    else if ((ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB] == PIN_WAIT_RISING &&
+                                              !edge_prev && selected_pin_sync) ||
+                                             (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB] == PIN_WAIT_FALLING &&
+                                              edge_prev && !selected_pin_sync)) begin
+                                        pc_sel = PC_PLUS_1;
+                                        next_state = FETCH;
+                                        next_edge_armed = 1'b0;
+                                    end
+                                end
+
+                                default: begin end
+                            endcase
+                        end
+                        else if (ir[PIN_CTRL_MODE_BIT] == PIN_BRANCH_MODE) begin
+                            case (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB])
+                                PIN_BR_LOW: begin
+                                    branch_legal = gpio_sync_valid;
+                                    branch_taken = !selected_pin_sync;
+                                end
+                                PIN_BR_HIGH: begin
+                                    branch_legal = gpio_sync_valid;
+                                    branch_taken = selected_pin_sync;
+                                end
+                                PIN_BR_JMP: begin
+                                    branch_legal = 1'b1;
+                                    branch_taken = 1'b1;
+                                end
+                                PIN_BR_FLAG: begin
+                                    if (ir[PIN_CTRL_FLAG_RSVD_BIT] == PIN_CTRL_FLAG_RSVD_REQUIRED) begin
+                                        branch_legal = 1'b1;
+                                        branch_taken = (ir[PIN_CTRL_FLAG_SENSE_BIT] == BR_FLAG_TRUE)
+                                                     ? cmp_flag : !cmp_flag;
+                                    end
+                                end
+                                default: begin end
+                            endcase
+
+                            if (branch_legal) begin
+                                pc_sel = branch_taken ? PC_TARGET : PC_PLUS_2;
+                                next_state = FETCH;
+                                if (branch_taken) begin
+                                    next_loop_active = 1'b0;
+                                    next_loop_remaining = 5'd0;
+                                end
+                            end
+                        end
+                    end
                     else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_SHIFT_IN) begin
-                        if (ir[SHIFT_IN_RSVD_MSB:SHIFT_IN_RSVD_LSB] == SHIFT_IN_RSVD_REQUIRED) begin
+                        if (ir[SHIFT_IN_RSVD_MSB:SHIFT_IN_RSVD_LSB] == SHIFT_IN_RSVD_REQUIRED &&
+                            gpio_sync_valid) begin
                             exec_shift_in = 1'b1;
                             pc_sel = PC_PLUS_1;
                             next_state = FETCH;

@@ -7,7 +7,8 @@ The current RTL implements instruction fetching, PC selection, WAIT/WAIT_C, SET_
 SHIFT decoding and datapath, MOVE decoding and writeback, and unsigned EQ/LT/GT
 comparison with a persistent flag. These have standalone/controller tests.
 `protocol_core.sv` and complete instruction-driven datapath integration are pending.
-PIN_CTRL, LOOP and DATA_IO have length decoding but no execution implementation.
+LOOP and all legal PIN_CTRL modes now have controller execution logic and PC target
+loading; their functional verification is deferred. DATA_IO has length decoding only.
 No complete protocol demo, synthesis area or static timing result is claimed.
 
 ## Architecture references
@@ -24,17 +25,26 @@ share constants from `rtl/isa_pkg.sv`; compile it before importing modules.
 |---|---|
 | `pc` | PC |
 | `inst_fetch` | IR, IMM and combinational instruction addressing |
-| `control_unit` | Four-state FSM and persistent `direction` |
+| `control_unit` | Four-state FSM, persistent `direction`, loop counter/active state, pin-edge wait state |
 | `wait_timer` | T and remaining wait counter |
 | `register_file`, instantiated by `shift_datapath` | R0/R1, one write port |
-| `shift_datapath` | GPIO input synchronization and output value/enable |
+| `shift_datapath` | GPIO input synchronization/validity and output value/enable |
 | `cmp_datapath` | `cmp_flag` |
 
 Immediate data goes directly from `inst_fetch.imm` to the data/comparison consumers.
+For future integration, also connect `inst_fetch.imm` to `pc.pc_target`,
+`shift_datapath.gpio_in_sync` to `control_unit.gpio_in_sync`, and
+`shift_datapath.gpio_sync_valid` to `control_unit.gpio_sync_valid`, plus
+`cmp_datapath.cmp_flag` to `control_unit.cmp_flag`. `PC_TARGET` (`11`) loads the
+absolute byte target on a taken branch or repeating LOOP. No top-level is added.
+`gpio_sync_valid` resets low and rises with the second post-reset sample. SHIFT_IN
+and pin-dependent waits/branches hold until it is high; edge waits arm only on a
+valid sample. An initial SHIFT_IN or level WAIT_PIN can therefore take an extra
+startup clock. JMP, flag branches, and timer WAIT do not depend on pin validity.
 All resets are synchronous and active-high. Current reserved/unsupported instructions
 stall in EXECUTE without writes; no `illegal_inst` or `retire` output exists.
 
-## Run all seven suites with Icarus
+## Run all eight suites with Icarus
 
 From the repository root, in Bash with `iverilog` and `vvp` installed:
 
@@ -43,7 +53,7 @@ set -e
 sources=(rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv
          rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv rtl/wait_timer.sv)
 tops=(tb_pc tb_wait_timer tb_control_unit_fetch tb_control_unit
-      tb_cmp_datapath tb_register_file tb_shift_datapath)
+      tb_cmp_datapath tb_register_file tb_shift_datapath tb_gpio_sync_startup)
 build_dir=$(mktemp -d /tmp/protocol-emulator-XXXXXX)
 for top in "${tops[@]}"; do
     iverilog -g2012 -s "$top" -o "$build_dir/$top.vvp" "${sources[@]}" "tb/$top.sv"
@@ -80,15 +90,19 @@ They do not replace checking that compilation and every suite finish successfull
 
 ## Verification coverage
 
+The suites include a focused GPIO startup regression. Complete LOOP/PIN_CTRL
+functional coverage remains deferred.
+
 | Suite | Checks |
 |---|---|
 | `tb_pc` | 518 selector/address/reset checks |
 | `tb_wait_timer` | 25 timer tests |
-| `tb_control_unit_fetch` | All 256 lengths, 32 MOVE-family encodings, 624 cycle checks |
+| `tb_control_unit_fetch` | All 256 lengths, 32 MOVE-family encodings, 560 cycle checks |
 | `tb_control_unit` | 24 WAIT and 8 WAIT_C timing cases; original 25-cycle and 765-cycle reference programs |
 | `tb_cmp_datapath` | 432 comparisons, 20 retention/invalid-command cases, 459 cycle checks |
 | `tb_register_file` | 29 reset/write/retention checks |
 | `tb_shift_datapath` | MOVE, 16 SHIFT_IN bytes, 16 SHIFT_OUT bytes, 48 fixed-output cases; 680 cycle checks |
+| `tb_gpio_sync_startup` | 24 startup cases: every pin/wait mode, initial SHIFT_IN into either register, reset clears validity/arming |
 
 The datapath suite checks both registers, directions and every pin, synchronization
 latency, output of the old register endpoint, untouched-pin retention and synchronous

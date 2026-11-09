@@ -5,7 +5,7 @@
 **Authors/ownership:** Two-person split defined in §9  
 **Existing documents:** `protocol_emulator_ISA_v1_proposed.md` and `Protocol_Emulator_WAIT_WAIT_C_Microarchitecture_v1_1.md`
 
-> **Current encoding authority:** The agreed microarchitecture and `rtl/isa_pkg.sv` define CMP EQ/unsigned LT/unsigned GT in IR[1:0]. `protocol_emulator_ISA_v1_proposed.md` now records these encodings and the persistent `cmp_flag`. Older equality-only flag descriptions are superseded. Branch execution remains future work.
+> **Current encoding authority:** The agreed microarchitecture and `rtl/isa_pkg.sv` define CMP EQ/unsigned LT/unsigned GT in IR[1:0]. `protocol_emulator_ISA_v1_proposed.md` now records these encodings and the persistent `cmp_flag`. Older equality-only flag descriptions are superseded. Branch execution is now implemented in control_unit; top-level integration and branch verification remain deferred.
 
 ---
 
@@ -155,6 +155,7 @@ module shift_datapath (
     output logic [3:0] gpio_out_value,
     output logic [3:0] gpio_out_enable,
     output logic [3:0] gpio_in_sync,   // synchronized pin levels for future PIN_CTRL
+    output logic       gpio_sync_valid, // both stages have filled after reset
 
     // Always-readable architectural data for CMP and future operations.
     output logic [7:0] r0_data,
@@ -164,13 +165,13 @@ module shift_datapath (
 
 Internally **instantiate `register_file`**. This module owns the selected-register read mux, opposite-register selection, shift-result logic, MOV result selection, and the **one writeback mux** that drives `write_en`, `write_sel`, and `write_data`.
 
-Input sync: `gpio_sync1` captures `gpio_in_async` on each rising edge; the registered output `gpio_in_sync` captures the previous `gpio_sync1`. `gpio_in_sync` is itself the second stage; no third register is required. Future PIN_CTRL can reuse it. SHIFT_IN uses **pre-edge `gpio_in_sync[pin_sel]`** on its retirement edge. Reset both synchronizer stages. Other instructions do not modify synchronization behavior.
+Input sync: `gpio_sync1` captures `gpio_in_async` on each rising edge; the registered output `gpio_in_sync` captures the previous `gpio_sync1`. `gpio_in_sync` is itself the second stage; no third sample register is required. PIN_CTRL reuses it. SHIFT_IN uses **pre-edge `gpio_in_sync[pin_sel]`** on its retirement edge. Reset both synchronizer stages and a parallel two-bit validity pipeline to zero. `gpio_sync_valid` becomes high after two post-reset sampling edges; consumers can first use it at the third edge. It tracks startup fill, not metastability. The controller holds SHIFT_IN until valid, and the datapath also suppresses SHIFT_IN writeback while invalid. Other instructions do not modify synchronization behavior.
 
 **Register write conditions** (exactly one at a time):
 
 | Command | Register write? | Value written to selected Rn |
 |---|---|---|
-| `exec_shift_in` | Yes | RIGHT: `{sample, Rn[7:1]}`; LEFT: `{Rn[6:0], sample}` |
+| `exec_shift_in` | Only if `gpio_sync_valid` | RIGHT: `{sample, Rn[7:1]}`; LEFT: `{Rn[6:0], sample}` |
 | `exec_shift_out`, mode `00/01/10` | **No** | N/A |
 | `exec_shift_out`, mode `11` | Yes | RIGHT: `{1'b0, Rn[7:1]}`; LEFT: `{Rn[6:0], 1'b0}` |
 | `exec_mov_imm` | Yes | `imm_data` |
@@ -228,6 +229,9 @@ module control_unit (
     input   logic         reset,
     input   logic         wait_is_single_cycle,
     input   logic         wait_is_last_cycle,
+    input   logic [3:0]   gpio_in_sync,
+    input   logic         gpio_sync_valid,
+    input   logic         cmp_flag,
 
     output  logic         ir_load,
     output  logic         imm_load,
@@ -252,7 +256,7 @@ module control_unit (
 
 The controller owns only its four-state FSM and persistent `direction` flag. `pc` owns PC; `inst_fetch` owns IR/IMM and addressing. `inst` supplies live length predecode; `ir` supplies execution fields. `ir_load` and `imm_load` control capture in FETCH and FETCH_OPERAND respectively. No immediate-data bus enters or leaves the controller. Its one-bit `wait_c_nonzero` input checks the full candidate T, not only IMM or the timer's previously stored T.
 
-`direction` resets RIGHT and changes only on legal SET_DIR completion; connect it to `shift_datapath.shift_dir`. CMP flag storage belongs solely to `cmp_datapath`. A future branch implementation will add a controller `cmp_flag` input when needed; it is absent today.
+`direction` resets RIGHT and changes only on legal SET_DIR completion; connect it to `shift_datapath.shift_dir`. CMP flag storage belongs solely to `cmp_datapath`. The controller now has a `cmp_flag` input for BR_TRUE/BR_FALSE; connect this directly to the comparator output during future top-level integration.
 
 Derived control selectors are `reg_sel=ir[4]`, `pin_sel=ir[3:2]`, `shift_out_mode=ir[1:0]`, and `cmp_op=ir[1:0]`. Consumers use a selector only when its execution strobe is high. All execution strobes are low during reset and fetch, and are mutually exclusive. A legal instruction's strobe is sampled once at its final EXECUTE rising edge.
 
@@ -282,7 +286,7 @@ output logic [3:0] gpio_out_enable
 
 Keep the `gpio_in_sync[3:0]` signal available as an **internal top-level wire** for future `PIN_CTRL` (it does not need to be an external pin).
 
-Wire `pc`, `inst_fetch`, `control_unit`, `wait_timer`, `shift_datapath`, and `cmp_datapath`; route R0/R1 directly from the register bank to CMP and saved IMM directly from `inst_fetch` to both datapaths. Keep `cmp_flag` available internally for future branching; the controller does not consume it yet. Connect common active-high synchronous reset to `control_unit.reset`/`pc.reset`/`inst_fetch.reset` and the datapaths' `rst` ports. The top must not copy storage, add a second register write driver, or implement internal pad tri-states.
+Wire `pc`, `inst_fetch`, `control_unit`, `wait_timer`, `shift_datapath`, and `cmp_datapath`; route R0/R1 directly from the register bank to CMP and saved IMM directly from `inst_fetch` to both datapaths. Keep `cmp_flag` available internally for future branching; connect it to the controller cmp_flag input for branching. Connect common active-high synchronous reset to `control_unit.reset`/`pc.reset`/`inst_fetch.reset` and the datapaths' `rst` ports. The top must not copy storage, add a second register write driver, or implement internal pad tri-states.
 
 ---
 

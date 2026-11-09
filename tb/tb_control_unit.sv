@@ -48,6 +48,8 @@ module tb_control_unit;
 
     //control unit
     control_unit dut (
+        .gpio_in_sync(4'b0000), .cmp_flag(1'b0),
+        .gpio_sync_valid(1'b1), // Standalone controller inputs are already usable.
         .inst(inst),
         .ir(ir),
         .wait_c_nonzero(wait_c_nonzero),
@@ -231,6 +233,7 @@ module tb_control_unit;
 
     // Separate PC block owns increment selection and storage.
     pc u_pc (
+        .pc_target   (imm),
         .clk         (clk),
         .reset       (reset),
         .pc_sel      (pc_sel),

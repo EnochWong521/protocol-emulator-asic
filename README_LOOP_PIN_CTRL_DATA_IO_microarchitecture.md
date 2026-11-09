@@ -1,6 +1,6 @@
 # Protocol Emulator ASIC — `LOOP`, `PIN_CTRL`, and `DATA_IO` Microarchitecture
 
-**Status:** Future instruction-family proposal. PIN_CTRL, LOOP, and DATA_IO have length decoding only; their execution logic, mailboxes and tests are not implemented.
+**Status:** LOOP and all legal PIN_CTRL modes are implemented in the controller, with absolute target loading in the PC. Functional verification and top-level integration are deferred. DATA_IO, mailboxes, and host UART remain proposals; no execution logic is implemented for DATA_IO.
 **ISA reference:** `protocol_emulator_ISA_v1_proposed.md` (current EQ/LT/GT encoding reference)
 **Previous milestone:** `Protocol_Emulator_WAIT_WAIT_C_Microarchitecture_v1_1.md`
 **Processor:** 8-bit byte-addressed PC, 256 × 8 instruction memory, non-pipelined multicycle execution, R0/R1 (8 bits)
@@ -40,7 +40,7 @@ The prior WAIT milestone established:
 5. A blocking instruction can remain in `EXECUTE` for extra clocks. Its side effects must occur **once**, on successful completion; PC must hold while blocked.
 6. Preserve the existing `WAIT_REMAIN` state for timer waits; `WAIT_PIN` and `DATA_IO` can extend `EXECUTE` without borrowing the timer's countdown.
 
-**PC sources:** ordinary fall-through `PC + instruction_length`; taken `PIN_CTRL` branch or active `LOOP` repetition will use `IMM[7:0]` (absolute **byte** address). Keep one PC register. The current controller selects hold, +1, or +2 using `pc_sel`; a future target-load selection is needed for branches/LOOP. No speculative fetch, flush or branch prediction is required.
+**PC sources:** ordinary fall-through `PC + instruction_length`; taken `PIN_CTRL` branch or active `LOOP` repetition will use `IMM[7:0]` (absolute **byte** address). Keep one PC register. The controller selects hold, +1, +2, or `PC_TARGET` (`11`) using `pc_sel`; `pc.pc_target` must be wired directly to saved IMM. No speculative fetch, flush or branch prediction is required.
 
 ### Two-byte predecode (from the ISA)
 
@@ -169,7 +169,7 @@ mode=0: branch, 2 bytes, IMM is absolute target
                               IR[3]=1 -> BR_FALSE IMM
 ```
 
-**Reserved:** `mode=0`, `condition=11`, `IR[4]=1`. The future decoder must reject this encoding; current reserved instructions stall without writes and have no trap/fault output; do not silently treat it as `BR_FALSE` or `JMP`.
+**Reserved:** `mode=0`, `condition=11`, `IR[4]=1`. The decoder rejects this encoding; current reserved instructions stall without writes and have no trap/fault output; do not silently treat it as `BR_FALSE` or `JMP`.
 
 ### 4.2 Pin input datapath
 
@@ -192,6 +192,8 @@ external P0..P3 -> 2-flop synchronizer for each pin -> pin_sync[3:0]
 ```
 
 Sample only synchronized **input** signals. A released high-Z output does not create a logical `Z` condition for the instruction; input is read as 0/1 according to the physical level/pull-up. Use a shared synchronizer from the GPIO subsystem if one already exists. **Do not place a second independent 2-flop synchronizer in `PIN_CTRL`**.
+
+**Startup validity:** Connect `shift_datapath.gpio_sync_valid` to the controller input of the same name. It resets low and becomes high alongside the second post-reset synchronized sample. WAIT_PIN must neither evaluate a level nor arm an edge baseline until valid; BRANCH_PIN also holds until valid. JMP and comparison-flag branches ignore this signal. The first instruction can therefore require an extra startup execution clock; ordinary timing below assumes valid samples are already available. Validity tracks reset recovery, not detection or elimination of metastability.
 
 ### 4.3 Branch execution (2-byte, one EXECUTE cycle)
 
@@ -402,11 +404,12 @@ pc u_pc (
     .clk    (clk),
     .reset  (rst),
     .pc_sel (pc_sel),
+    .pc_target (imm), // saved operand from inst_fetch
     .pc     (pc_value)
 );
 ```
 
-The instruction-fetch block reads `pc_value`, owns the single IR/IMM register pair, and selects the instruction address (PC or PC+1). The controller reads live `inst` for length decoding and saved `ir` for execution, drives `ir_load`/`imm_load`, and selects `PC_PLUS_1` or `PC_PLUS_2` only on the final execution cycle. Integration wiring forwards saved instruction data to the datapaths and provides `wait_c_nonzero=|t_write_data` to the controller for WAIT_C legality. The controller has no IMM data input. The PC block owns PC arithmetic and storage; the controller contains no PC, IR, or IMM registers. Selector `2'b11` is reserved and currently holds. Branch/LOOP implementation will require a target-load selection and an 8-bit target input; neither is implemented in Step 7. Person A owns this integration.
+The instruction-fetch block reads `pc_value`, owns the single IR/IMM register pair, and selects the instruction address (PC or PC+1). The controller reads live `inst` for length decoding and saved `ir` for execution, drives `ir_load`/`imm_load`, and selects `PC_PLUS_1` or `PC_PLUS_2` only on the final execution cycle. Integration wiring forwards saved instruction data to the datapaths and provides `wait_c_nonzero=|t_write_data` to the controller for WAIT_C legality. The controller has no IMM data input. The PC block owns PC arithmetic and storage; the controller contains no PC, IR, or IMM registers. Selector `PC_TARGET` (`2'b11`) now loads the 8-bit `pc_target` input. Connect saved IMM directly to that input. The controller also now requires `gpio_in_sync[3:0]` from the existing shift datapath and `cmp_flag` from the comparator; its loop and edge-wait state are internal. These connections remain for future top-level integration. Person A owns this integration.
 
 ### 6.2 Sequencer ↔ mailboxes (proposed stable contract)
 

@@ -68,11 +68,13 @@ module tb_control_unit_fetch;
     );
 
     pc u_pc (
-        .clk(clk), .reset(reset), .pc_sel(pc_sel), .pc(pc)
+        .clk(clk), .reset(reset), .pc_sel(pc_sel), .pc_target(imm), .pc(pc)
     );
 
     control_unit dut (
         .clk(clk), .reset(reset), .inst(inst), .ir(ir), .wait_c_nonzero(wait_c_nonzero),
+        .gpio_in_sync(4'b0000), .cmp_flag(1'b0),
+        .gpio_sync_valid(1'b1), // Standalone controller inputs are already usable.
         .ir_load(ir_load), .imm_load(imm_load), .pc_sel(pc_sel),
         .wait_is_single_cycle(wait_is_single_cycle),
         .wait_is_last_cycle(wait_is_last_cycle),
@@ -267,8 +269,9 @@ module tb_control_unit_fetch;
                     reserved_move_cases++;
                 end
             end
-            // Unsupported opcodes and reserved encodings hold without writes.
-            else if (byte_value >= 64 ||
+            // LOOP/PIN_CTRL above have length coverage only here; execution
+            // verification is deferred. Other unsupported/reserved bytes stall.
+            else if (byte_value >= 128 ||
                      (byte_value >= 32 && byte_value < 64 &&
                       !LEGAL_WAIT_ENCODINGS[byte_value - 32]))
                 cycle(dut.EXECUTE, dut.EXECUTE, 8'd0, 0);

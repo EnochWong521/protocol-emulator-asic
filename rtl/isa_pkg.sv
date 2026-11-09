@@ -29,11 +29,12 @@ package isa_pkg;
     localparam int TWO_BYTES        = 2;
 
     // Internal PC control interface, not instruction-byte encodings.
-    // 2'b11 is reserved for a future branch-target selection.
+    // PC_TARGET loads the saved operand byte on branch/LOOP retirement.
     typedef enum logic [1:0] {
         PC_HOLD   = 2'b00,
         PC_PLUS_1 = 2'b01,
-        PC_PLUS_2 = 2'b10
+        PC_PLUS_2 = 2'b10,
+        PC_TARGET = 2'b11
     } pc_sel_t;
 
     typedef enum logic [2:0] {

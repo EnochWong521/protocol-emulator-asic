@@ -12,6 +12,7 @@ module shift_datapath (
     input  logic [7:0] imm_data,
     input  logic [3:0] gpio_in_async,
     output logic [3:0] gpio_in_sync,
+    output logic       gpio_sync_valid,
     output logic [3:0] gpio_out_value,
     output logic [3:0] gpio_out_enable,
     output logic [7:0] r0_data,
@@ -20,6 +21,7 @@ module shift_datapath (
     import isa_pkg::*;
 
     logic [3:0] gpio_sync1;
+    logic       gpio_sync1_valid;
     logic [7:0] selected_reg;
     logic       write_en;
     logic [7:0] write_data;
@@ -35,15 +37,20 @@ module shift_datapath (
         .r1_data    (r1_data)
     );
 
-    // Needed because shift in needs this before execution
+    // Fill both stages before consumers may use the synchronized samples.
+    // Validity tracks startup only; it is not a metastability detector.
     always_ff @(posedge clk) begin
         if (rst) begin
             gpio_sync1  <= 4'b0000;
             gpio_in_sync <= 4'b0000;
+            gpio_sync1_valid <= 1'b0;
+            gpio_sync_valid <= 1'b0;
         end
         else begin
             gpio_sync1   <= gpio_in_async;
             gpio_in_sync <= gpio_sync1;
+            gpio_sync1_valid <= 1'b1;
+            gpio_sync_valid <= gpio_sync1_valid;
         end
     end
 
@@ -61,7 +68,7 @@ module shift_datapath (
         write_data = selected_reg;
 
         if (exec_shift_in) begin
-            write_en = 1'b1;
+            write_en = gpio_sync_valid;
             if (shift_dir == DIR_RIGHT) begin
                 write_data = {gpio_in_sync[pin_sel], selected_reg[7:1]};
             end

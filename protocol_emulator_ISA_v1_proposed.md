@@ -1,6 +1,6 @@
 # Protocol Emulator ISA — Current Encoding Reference
 
-Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and unsigned EQ/LT/GT comparison have standalone/controller verification. The complete `protocol_core`, instruction-level datapath integration, PIN_CTRL, LOOP, and DATA_IO are pending. The microarchitecture documents define module ownership and timing; `rtl/isa_pkg.sv` supplies shared encoding constants.
+Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and unsigned EQ/LT/GT comparison have standalone/controller verification. LOOP and all legal PIN_CTRL modes have controller execution logic and PC target loading; their verification is deferred. The complete `protocol_core`, instruction-level datapath integration, and DATA_IO remain pending. The microarchitecture documents define module ownership and timing; `rtl/isa_pkg.sv` supplies shared encoding constants.
 
 ## Design contract
 
@@ -109,7 +109,7 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 
 MOV preserves `cmp_flag`; CMP preserves R0/R1. The flag resets to zero and holds across all non-CMP instructions. A legal CMP writes it at the rising edge completing EXECUTE. Selected-register order matters for LT/GT. EQ/LT/GT are byte comparisons; there is no general arithmetic ALU.
 
-Future `BR_TRUE`/`BR_FALSE` test this Boolean result without changing the branch encoding. Older BR_EQ/BR_NE mnemonics describe only equality-based use; they are not implemented assembler aliases in this repository.
+`BR_TRUE`/`BR_FALSE` test this Boolean result without changing the branch encoding. Older BR_EQ/BR_NE mnemonics describe only equality-based use; they are not implemented assembler aliases in this repository.
 
 ### `111 DATA_IO` group (1 byte)
 - Byte 0: `[7:5]=111`, `[4]=reg`, `[3]=mode`, `[2:0]=000`.
@@ -122,7 +122,7 @@ Future `BR_TRUE`/`BR_FALSE` test this Boolean result without changing the branch
 
 - `FETCH`: read `mem[PC]`, latch opcode and first-byte fields (one system-clock cycle).
 - If the opcode+submode requires a second byte: `FETCH_OPERAND`: read `mem[PC+1]`, latch extension (one cycle).
-- `EXECUTE`: perform the instruction and update PC on completion. For WAIT with D>1, its first execution cycle enters `WAIT_REMAIN` for the remaining D-1 cycles. Future WAIT_PIN/DATA_IO can stall in EXECUTE.
+- `EXECUTE`: perform the instruction and update PC on completion. For WAIT with D>1, its first execution cycle enters `WAIT_REMAIN` for the remaining D-1 cycles. WAIT_PIN stalls in EXECUTE; future DATA_IO will use the same blocking convention.
 - Thus a nonblocking 1-byte instruction consumes **2 cycles** and a nonblocking 2-byte instruction **3 cycles**, including fetch.
 - For `WAIT D`, EXECUTE lasts exactly D cycles (not D cycles plus one EXECUTE cycle). Fetch of WAIT still consumes one extra cycle. For waiting on a pin, EXECUTE lasts until the condition is satisfied, with at least one EXECUTE cycle.
 - Ordinary register/flag/GPIO effects commit on the last EXECUTE clock edge. For branches/loops, PC updates on that edge.
@@ -137,6 +137,7 @@ Future `BR_TRUE`/`BR_FALSE` test this Boolean result without changing the branch
 - GPIO outputs default **high-Z** (`oe=0`). UART firmware must drive TX high before sending.
 - Host mailboxes initially invalid/empty. Wait counter cleared; execution starts at PC0 after reset.
 - Two-flop synchronizer per input pin; branch and shift operations read synchronized values only.
+- GPIO sample validity resets low and rises after both synchronizer stages fill. SHIFT_IN, WAIT_PIN, and pin-level branches hold until valid; edge waits establish their baseline only then. Initial pin instructions may require extra startup clocks. JMP, flag branches, and timer WAIT are independent of GPIO validity.
 
 ## Example pseudo-assembly — UART TX
 
@@ -232,4 +233,4 @@ For early RTL simulation, memory may use `$readmemh` and the host mailbox may be
 
 ## Current illegal-instruction behavior
 
-The controller holds PC and remains in EXECUTE for reserved or unsupported encodings, with all write strobes low. It has no `illegal_inst` output or trap mechanism. Length predecode is independent of legality: reserved immediate encodings still fetch the second byte before stalling. PIN_CTRL, LOOP, and DATA_IO have length decoding but no execution implementation yet.
+The controller holds PC and remains in EXECUTE for reserved or unsupported encodings, with all write strobes low. It has no `illegal_inst` output or trap mechanism. Length predecode is independent of legality: reserved immediate encodings still fetch the second byte before stalling. PIN_CTRL and LOOP have execution logic; DATA_IO has length decoding but no execution implementation yet.
