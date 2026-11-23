@@ -1,0 +1,7 @@
+// Address  Bytes   Instruction
+@00
+00 08   // 00: WAIT_C 8
+A1      // 02: SHIFT_OUT R0, P0, HIGH
+20      // 03: WAIT FULL
+A0      // 04: SHIFT_OUT R0, P0, LOW
+44 05   // 05: JMP 0x05 (stay low; ISA has no HALT)

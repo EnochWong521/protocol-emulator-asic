@@ -6,10 +6,12 @@ Small non-pipelined protocol emulator for programmable UART, SPI and I²C sequen
 The current RTL implements instruction fetching, PC selection, WAIT/WAIT_C, SET_DIR,
 SHIFT decoding and datapath, MOVE decoding and writeback, and unsigned EQ/LT/GT
 comparison with a persistent flag. These have standalone/controller tests.
-`protocol_core.sv` and complete instruction-driven datapath integration are pending.
+`rtl/protocol_core.sv` connects these modules, with a combinational external
+instruction-memory interface and separate GPIO output value/enable signals.
+An instruction-driven high/wait/low GPIO smoke test verifies the first complete path.
 LOOP and all legal PIN_CTRL modes now have controller execution logic and PC target
 loading; their functional verification is deferred. DATA_IO has length decoding only.
-No complete protocol demo, synthesis area or static timing result is claimed.
+No UART/SPI/I²C demo, synthesis area or static timing result is claimed.
 
 ## Architecture references
 
@@ -31,12 +33,11 @@ share constants from `rtl/isa_pkg.sv`; compile it before importing modules.
 | `shift_datapath` | GPIO input synchronization/validity and output value/enable |
 | `cmp_datapath` | `cmp_flag` |
 
-Immediate data goes directly from `inst_fetch.imm` to the data/comparison consumers.
-For future integration, also connect `inst_fetch.imm` to `pc.pc_target`,
-`shift_datapath.gpio_in_sync` to `control_unit.gpio_in_sync`, and
-`shift_datapath.gpio_sync_valid` to `control_unit.gpio_sync_valid`, plus
-`cmp_datapath.cmp_flag` to `control_unit.cmp_flag`. `PC_TARGET` (`11`) loads the
-absolute byte target on a taken branch or repeating LOOP. No top-level is added.
+The core connects `inst_fetch.imm` directly to the data/comparison consumers and
+`pc.pc_target`, the shared GPIO synchronizer and validity to the controller, and
+`cmp_datapath.cmp_flag` back to the controller. `PC_TARGET` (`11`) loads the
+absolute byte target on a taken branch or repeating LOOP. The register bank stays
+inside `shift_datapath`; the comparator reads that same bank.
 `gpio_sync_valid` resets low and rises with the second post-reset sample. SHIFT_IN
 and pin-dependent waits/branches hold until it is high; edge waits arm only on a
 valid sample. An initial SHIFT_IN or level WAIT_PIN can therefore take an extra
@@ -44,20 +45,45 @@ startup clock. JMP, flag branches, and timer WAIT do not depend on pin validity.
 All resets are synchronous and active-high. Current reserved/unsupported instructions
 stall in EXECUTE without writes; no `illegal_inst` or `retire` output exists.
 
-## Run all eight suites with Icarus
+## Pin pulse example
+
+[`examples/pin_pulse.hex`](examples/pin_pulse.hex) is a manually encoded program
+loaded with `$readmemh` by `tb_protocol_core`:
+
+```text
+0x00: WAIT_C 8
+0x02: SHIFT_OUT R0, P0, HIGH
+0x03: WAIT FULL
+0x04: SHIFT_OUT R0, P0, LOW
+0x05: JMP 0x05
+```
+
+Fixed HIGH/LOW output modes do not modify R0. The pin starts released, drives high
+on active clock edge 5, and drives low on edge 16. The high pulse lasts **11 clocks**:
+one WAIT fetch + eight WAIT execution clocks + two LOW instruction clocks. The final
+self-jump keeps P0 driven low; the ISA has no HALT. Other pins stay released.
+
+Provide instruction data as `inst = memory[inst_addr]` with no registered read
+latency. GPIO pad buffers belong outside the core and drive only when the matching
+`gpio_out_enable` bit is high. Reset is synchronous, active-high, and restarts at PC 0.
+
+## Run all nine suites with Icarus
 
 From the repository root, in Bash with `iverilog` and `vvp` installed:
 
 ```bash
 set -e
 sources=(rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv
-         rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv rtl/wait_timer.sv)
+         rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv rtl/wait_timer.sv
+         rtl/protocol_core.sv)
 tops=(tb_pc tb_wait_timer tb_control_unit_fetch tb_control_unit
-      tb_cmp_datapath tb_register_file tb_shift_datapath tb_gpio_sync_startup)
+      tb_cmp_datapath tb_register_file tb_shift_datapath tb_gpio_sync_startup
+      tb_protocol_core)
+repo_dir=$PWD
 build_dir=$(mktemp -d /tmp/protocol-emulator-XXXXXX)
 for top in "${tops[@]}"; do
     iverilog -g2012 -s "$top" -o "$build_dir/$top.vvp" "${sources[@]}" "tb/$top.sv"
-    (cd "$build_dir" && vvp "$build_dir/$top.vvp")
+    (cd "$build_dir" && vvp "$build_dir/$top.vvp" +program="$repo_dir/examples/pin_pulse.hex")
 done
 printf 'Artifacts: %s\n' "$build_dir"
 ```
@@ -72,6 +98,16 @@ For example, after the commands above:
 gtkwave "$build_dir/shift_datapath.vcd"
 ```
 
+To generate the pin pulse waveform after compiling the suites:
+
+```bash
+(cd "$build_dir" && vvp "$build_dir/tb_protocol_core.vvp" \
+    +program="$repo_dir/examples/pin_pulse.hex" +vcd)
+gtkwave "$build_dir/protocol_core.vcd"
+```
+
+Inspect `clk`, `reset`, `inst_addr`, `gpio_out_value[0]`, and `gpio_out_enable[0]`.
+
 ## Run the same suites with Verilator
 
 Reuse the `sources`, `tops` and `build_dir` variables above. Requires Verilator and a C++ toolchain:
@@ -80,7 +116,7 @@ Reuse the `sources`, `tops` and `build_dir` variables above. Requires Verilator 
 for top in "${tops[@]}"; do
     verilator --binary --timing --trace -Wno-fatal --top-module "$top" \
         --Mdir "$build_dir/obj-$top" "${sources[@]}" "tb/$top.sv"
-    (cd "$build_dir" && "$build_dir/obj-$top/V$top")
+    (cd "$build_dir" && "$build_dir/obj-$top/V$top" +program="$repo_dir/examples/pin_pulse.hex")
 done
 ```
 
@@ -91,7 +127,7 @@ They do not replace checking that compilation and every suite finish successfull
 ## Verification coverage
 
 The suites include a focused GPIO startup regression. Complete LOOP/PIN_CTRL
-functional coverage remains deferred.
+functional coverage remains deferred; the core smoke test also exercises JMP self.
 
 | Suite | Checks |
 |---|---|
@@ -103,8 +139,9 @@ functional coverage remains deferred.
 | `tb_register_file` | 29 reset/write/retention checks |
 | `tb_shift_datapath` | MOVE, 16 SHIFT_IN bytes, 16 SHIFT_OUT bytes, 48 fixed-output cases; 680 cycle checks |
 | `tb_gpio_sync_startup` | 24 startup cases: every pin/wait mode, initial SHIFT_IN into either register, reset clears validity/arming |
+| `tb_protocol_core` | Checked-in GPIO pulse program: exact HIGH/LOW edges and output enables, 11-clock pulse, JMP self, reset after execution |
 
 The datapath suite checks both registers, directions and every pin, synchronization
 latency, output of the old register endpoint, untouched-pin retention and synchronous
-reset priority. Core integration must still verify MOV followed by CMP, SET_DIR followed
+reset priority. Further core integration tests must verify MOV followed by CMP, SET_DIR followed
 by actual shifts, GPIO commit edges and flag retention across intervening instructions.
