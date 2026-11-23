@@ -1,7 +1,9 @@
-// Address  Bytes   Instruction
+// Ten pulses: 8 clocks HIGH and 8 clocks LOW between pulses.
 @00
 00 08   // 00: WAIT_C 8
-A1      // 02: SHIFT_OUT R0, P0, HIGH
-20      // 03: WAIT FULL
-A0      // 04: SHIFT_OUT R0, P0, LOW
-44 05   // 05: JMP 0x05 (stay low; ISA has no HALT)
+20      // 02: pulse: WAIT FULL (low interval)
+A1      // 03: SHIFT_OUT R0, P0, HIGH
+20      // 04: WAIT FULL (high interval)
+A0      // 05: SHIFT_OUT R0, P0, LOW
+6A 02   // 06: LOOP 10, pulse
+44 08   // 08: done: JMP done

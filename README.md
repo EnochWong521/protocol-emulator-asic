@@ -11,7 +11,8 @@ instruction-memory interface and separate GPIO output value/enable signals.
 An instruction-driven high/wait/low GPIO smoke test verifies the first complete path.
 LOOP and all legal PIN_CTRL modes now have controller execution logic and PC target
 loading; their functional verification is deferred. DATA_IO has length decoding only.
-No UART/SPI/I²C demo, synthesis area or static timing result is claimed.
+Firmware-driven UART 8N1 TX/RX demos are simulated; SPI/I²C demos, synthesis area
+and static timing results remain pending.
 
 ## Architecture references
 
@@ -28,7 +29,7 @@ share constants from `rtl/isa_pkg.sv`; compile it before importing modules.
 | `pc` | PC |
 | `inst_fetch` | IR, IMM and combinational instruction addressing |
 | `control_unit` | Four-state FSM, persistent `direction`, loop counter/active state, pin-edge wait state |
-| `wait_timer` | T and remaining wait counter |
+| `wait_timer` | T, elapsed counter, pending WAIT count, timing_overrun |
 | `register_file`, instantiated by `shift_datapath` | R0/R1, one write port |
 | `shift_datapath` | GPIO input synchronization/validity and output value/enable |
 | `cmp_datapath` | `cmp_flag` |
@@ -45,103 +46,170 @@ startup clock. JMP, flag branches, and timer WAIT do not depend on pin validity.
 All resets are synchronous and active-high. Current reserved/unsupported instructions
 stall in EXECUTE without writes; no `illegal_inst` or `retire` output exists.
 
-## Pin pulse example
+## Compensated WAIT changes
 
-[`examples/pin_pulse.hex`](examples/pin_pulse.hex) is a manually encoded program
-loaded with `$readmemh` by `tb_protocol_core`:
+The original WAIT encodings are retained: FULL=20, HALF=28, QUARTER=30.
+Experimental START/DONE instructions, background counter, examples and tests are
+removed; 21/22 are reserved again. This changes WAIT semantics: it now includes
+all clocks elapsed since the previous timer WAIT completed, rather than adding a
+fresh D execution-clock delay. Existing firmware timing expectations must change.
+
+The first WAIT after reset establishes the reference and uses D execution clocks.
+Later WAITs subtract intervening fetch/execution clocks from the requested interval.
+WAIT_C changes T without resetting the reference. Each completed timer WAIT resets
+elapsed. WAIT_PIN completion reanchors the reference to the observed external event. A
+saturating counter prevents wraparound.
+
+If instructions already exceeded the requested interval, WAIT finishes immediately
+and sets `protocol_core.timing_overrun` until reset. The completion becomes the new
+reference. This reports the missed timing; it cannot make instructions run faster.
+
+| Changed area | What changed |
+|---|---|
+| Timer | Elapsed counter, first-reference handling, remainder calculation, sticky overrun |
+| ISA/controller/core | Original legal encodings restored; timer status keeps the four-state FSM; core exposes timing_overrun |
+| Firmware | WAIT immediately before each output, so equal post-WAIT output delays cancel |
+| Tests/docs | Updated unit/integration timing expectations; background experiment removed |
+
+## Ten pulses: eight clocks high and low
+
+`examples/pin_pulse.hex` contains this manually encoded program (no assembler needed):
 
 ```text
-0x00: WAIT_C 8
-0x02: SHIFT_OUT R0, P0, HIGH
-0x03: WAIT FULL
-0x04: SHIFT_OUT R0, P0, LOW
-0x05: JMP 0x05
+WAIT_C 8
+pulse:
+    WAIT FULL
+    SHIFT_OUT R0, P0, HIGH
+    WAIT FULL
+    SHIFT_OUT R0, P0, LOW
+    LOOP 10, pulse
+done:
+    JMP done
 ```
 
-Fixed HIGH/LOW output modes do not modify R0. The pin starts released, drives high
-on active clock edge 5, and drives low on edge 16. The high pulse lasts **11 clocks**:
-one WAIT fetch + eight WAIT execution clocks + two LOW instruction clocks. The final
-self-jump keeps P0 driven low; the ISA has no HALT. Other pins stay released.
+The low path's LOOP executes before the next WAIT and is included in that interval.
+Expected high=8 clocks, low=8 clocks. With the testbench's 10 ns clock, each is 80 ns.
+First HIGH is expected at 155 ns and first LOW at 235 ns. These values have been checked by simulation.
 
-Provide instruction data as `inst = memory[inst_addr]` with no registered read
-latency. GPIO pad buffers belong outside the core and drive only when the matching
-`gpio_out_enable` bit is high. Reset is synchronous, active-high, and restarts at PC 0.
+From the repository root, compile and run:
 
-## Run all nine suites with Icarus
+```bash
+mkdir -p build
+iverilog -g2012 -s tb_protocol_core -o build/tb_protocol_core.vvp \
+  rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv \
+  rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv \
+  rtl/wait_timer.sv rtl/protocol_core.sv tb/tb_protocol_core.sv
+(cd build && vvp tb_protocol_core.vvp +program=../examples/pin_pulse.hex +vcd)
+```
 
-From the repository root, in Bash with `iverilog` and `vvp` installed:
+Open `build/protocol_core.vcd` in WaveTrace and add clk, reset, gpio_out_value,
+gpio_out_enable, timing_overrun, and dut.u_timer.elapsed_cycles under tb_protocol_core.
+Zoom to fit. Old generated VCDs are stale until you run the new simulation.
+
+## Full-bit high, half-bit low
+
+`examples/pin_pulse_half.hex` uses T=16, WAIT HALF before HIGH and WAIT FULL before
+LOW. Expected high=16 clocks (160 ns) and low=8 clocks (80 ns). Run the same binary:
+
+```bash
+(cd build && vvp tb_protocol_core.vvp +half_low \
+  +program=../examples/pin_pulse_half.hex +vcd)
+```
+
+This overwrites protocol_core.vcd. Reload it in WaveTrace. T=16 is chosen because
+this loop cannot fit its minimum seven-clock low path into a four-clock interval.
+
+## UART transmit: complete 8N1 frame
+
+`examples/uart_tx_8n1.asm` is the readable assembly reference and
+`examples/uart_tx_8n1.hex` is its manually encoded image. No assembler is required.
+This example transmits 0x55 on P0, least-significant bit first, without parity,
+with one start bit and one stop bit. It holds idle high before and after the frame.
+It loads R0 with MOV rather than the still-unimplemented DATA_IO/PULL instruction.
+This is TX only; it does not implement receive or host transport.
+
+T=868 clocks at the testbench's 100 MHz clock gives an 8.68 microsecond bit period
+(approximately 115200 baud). WAIT immediately precedes every output, and the data
+loop's three clocks are included in the next bit period. The final HIGH confirms
+that the full stop interval has passed before the program enters its self-jump.
+
+Compile and simulate from the repository root:
+
+```bash
+mkdir -p build
+iverilog -g2012 -s tb_uart_tx -o build/tb_uart_tx.vvp \
+  rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv \
+  rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv \
+  rtl/wait_timer.sv rtl/protocol_core.sv tb/tb_uart_tx.sv
+(cd build && vvp tb_uart_tx.vvp +uart_program=../examples/uart_tx_8n1.hex +vcd)
+```
+
+Open `build/uart_tx.vcd` in WaveTrace. Under `tb_uart_tx`, add `tx`, `clk`, and
+`timing_overrun`. `tx` models an external idle-high pull-up while GPIO is released.
+For internal detail, add `dut.r0_data` and `dut.u_timer.elapsed_cycles`.
+
+Expected sequence: idle HIGH, start LOW, data **1 0 1 0 1 0 1 0**, stop HIGH,
+then idle HIGH. Each frame bit occupies 868 clocks / 8.68 microseconds.
+The expected start is 17.485 microseconds and stop begins at 95.605 microseconds;
+its full interval ends at 104.285 microseconds. Simulation checks confirm these times. The testbench checks every output clock,
+exact shift commit edges, eight data bits, stop length, enables and no overrun.
+
+## UART receive: external 8N1 frames
+
+`examples/uart_rx_8n1.asm` and its hex image receive on P1 with T=868. Firmware
+validates the start bit near its center, shifts eight LSB-first bits into R1,
+checks the stop bit, and copies a valid byte into R0. P2 records that a valid frame
+was received; P3 records a bad stop bit. Both markers remain high until reset.
+Host PUSH/mailbox transport is still unimplemented.
+
+RX testing exposed a timing-reference bug after arbitrary idle gaps. The fix is
+that **every completed WAIT_PIN reanchors elapsed timing to that completion edge**.
+This aligns WAIT HALF to the newly observed start event, rather than a previous
+frame's timer WAIT. Existing timer waits and TX keep their timing behavior.
+The synchronized start detection introduces a few clock cycles of sampling offset;
+data samples remain one local bit period apart and near the bit centers.
+
+Compile and run:
+
+```bash
+iverilog -g2012 -s tb_uart_rx -o build/tb_uart_rx.vvp \
+  rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv \
+  rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv \
+  rtl/wait_timer.sv rtl/protocol_core.sv tb/tb_uart_rx.sv
+(cd build && vvp tb_uart_rx.vvp +rx_program=../examples/uart_rx_8n1.hex +vcd)
+```
+
+Open `build/uart_rx.vcd` in WaveTrace. Add `rx`, `dut.r1_data`, `dut.r0_data`,
+`dut.exec_shift_in`, `value` (P2/P3 markers) and `overrun` under `tb_uart_rx`.
+The default run checks seven good frames, one framing error, a false start,
+arbitrary idle gaps, back-to-back frames, approximately +/-1% sender baud mismatch,
+and recovery without reset. Input edges exercise eight asynchronous phases; each
+data sample is asserted to be within one eighth of a bit period of its expected
+center. Bad frames must preserve the previous valid byte. Add `+exhaustive` to
+also receive all 256 byte values.
+TX was separately checked for all 256 payloads using `+payload=XX`.
+
+These are digital RTL checks at 100 MHz and nominal 115200 baud, not physical
+silicon timing, electrical validation, formal proof, or a general UART peripheral
+with host buffering. Simultaneous TX/RX on one sequential core is not demonstrated.
+
+## Run all eleven suites
+
+All suites pass in Icarus. In Bash from the repo root:
 
 ```bash
 set -e
 sources=(rtl/isa_pkg.sv rtl/pc.sv rtl/inst_fetch.sv rtl/control_unit.sv
-         rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv rtl/wait_timer.sv
-         rtl/protocol_core.sv)
-tops=(tb_pc tb_wait_timer tb_control_unit_fetch tb_control_unit
-      tb_cmp_datapath tb_register_file tb_shift_datapath tb_gpio_sync_startup
-      tb_protocol_core)
+         rtl/register_file.sv rtl/shift_datapath.sv rtl/cmp_datapath.sv
+         rtl/wait_timer.sv rtl/protocol_core.sv)
+tops=(tb_pc tb_wait_timer tb_control_unit_fetch tb_control_unit tb_cmp_datapath
+      tb_register_file tb_shift_datapath tb_gpio_sync_startup tb_protocol_core tb_uart_tx tb_uart_rx)
 repo_dir=$PWD
 build_dir=$(mktemp -d /tmp/protocol-emulator-XXXXXX)
 for top in "${tops[@]}"; do
-    iverilog -g2012 -s "$top" -o "$build_dir/$top.vvp" "${sources[@]}" "tb/$top.sv"
-    (cd "$build_dir" && vvp "$build_dir/$top.vvp" +program="$repo_dir/examples/pin_pulse.hex")
-done
-printf 'Artifacts: %s\n' "$build_dir"
-```
-
-A Makefile is optional. The source lists and selected top module make the commands
-independent of filename sorting. Timer/controller suites write VCDs in the artifact
-directory; the new register, shift and comparator suites enable dumping with `+vcd`.
-For example, after the commands above:
-
-```bash
-(cd "$build_dir" && vvp "$build_dir/tb_shift_datapath.vvp" +vcd)
-gtkwave "$build_dir/shift_datapath.vcd"
-```
-
-To generate the pin pulse waveform after compiling the suites:
-
-```bash
-(cd "$build_dir" && vvp "$build_dir/tb_protocol_core.vvp" \
-    +program="$repo_dir/examples/pin_pulse.hex" +vcd)
-gtkwave "$build_dir/protocol_core.vcd"
-```
-
-Inspect `clk`, `reset`, `inst_addr`, `gpio_out_value[0]`, and `gpio_out_enable[0]`.
-
-## Run the same suites with Verilator
-
-Reuse the `sources`, `tops` and `build_dir` variables above. Requires Verilator and a C++ toolchain:
-
-```bash
-for top in "${tops[@]}"; do
-    verilator --binary --timing --trace -Wno-fatal --top-module "$top" \
-        --Mdir "$build_dir/obj-$top" "${sources[@]}" "tb/$top.sv"
-    (cd "$build_dir" && "$build_dir/obj-$top/V$top" +program="$repo_dir/examples/pin_pulse.hex")
+  iverilog -g2012 -s "$top" -o "$build_dir/$top.vvp" "${sources[@]}" "tb/$top.sv"
+  (cd "$build_dir" && vvp "$build_dir/$top.vvp" +program="$repo_dir/examples/pin_pulse.hex" \
+    +uart_program="$repo_dir/examples/uart_tx_8n1.hex" \
+    +rx_program="$repo_dir/examples/uart_rx_8n1.hex")
 done
 ```
-
-`--trace` supports the optional `+vcd` argument. Existing warnings include RTL/testbench
-timescale differences and integer-to-counter-width conversions in the timer testbench.
-They do not replace checking that compilation and every suite finish successfully.
-
-## Verification coverage
-
-The suites include a focused GPIO startup regression. Complete LOOP/PIN_CTRL
-functional coverage remains deferred; the core smoke test also exercises JMP self.
-
-| Suite | Checks |
-|---|---|
-| `tb_pc` | 518 selector/address/reset checks |
-| `tb_wait_timer` | 25 timer tests |
-| `tb_control_unit_fetch` | All 256 lengths, 32 MOVE-family encodings, 560 cycle checks |
-| `tb_control_unit` | 24 WAIT and 8 WAIT_C timing cases; original 25-cycle and 765-cycle reference programs |
-| `tb_cmp_datapath` | 432 comparisons, 20 retention/invalid-command cases, 459 cycle checks |
-| `tb_register_file` | 29 reset/write/retention checks |
-| `tb_shift_datapath` | MOVE, 16 SHIFT_IN bytes, 16 SHIFT_OUT bytes, 48 fixed-output cases; 680 cycle checks |
-| `tb_gpio_sync_startup` | 24 startup cases: every pin/wait mode, initial SHIFT_IN into either register, reset clears validity/arming |
-| `tb_protocol_core` | Checked-in GPIO pulse program: exact HIGH/LOW edges and output enables, 11-clock pulse, JMP self, reset after execution |
-
-The datapath suite checks both registers, directions and every pin, synchronization
-latency, output of the old register endpoint, untouched-pin retention and synchronous
-reset priority. Further core integration tests must verify MOV followed by CMP, SET_DIR followed
-by actual shifts, GPIO commit edges and flag retention across intervening instructions.

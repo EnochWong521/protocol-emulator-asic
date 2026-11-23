@@ -38,13 +38,17 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 
 ### `001 WAIT duration` / `SET_DIR` (1 byte)
 - Byte 0: `[7:5]=001`, `[4:3]=submode`, `[2:0]=arg`.
-- `submode=00`, `arg=000`: `WAIT FULL` — `D=T`.
-- `submode=01`, `arg=000`: `WAIT HALF` — `D=max(1, T >> 1)`.
-- `submode=10`, `arg=000`: `WAIT QUARTER` — `D=max(1, T >> 2)`.
+- `submode=00`, `arg=000`: `WAIT FULL` (`20`) — interval D=T.
+- `submode=01`, `arg=000`: `WAIT HALF` (`28`) — D=max(1,T >> 1).
+- `submode=10`, `arg=000`: `WAIT QUARTER` (`30`) — D=max(1,T >> 2).
 - `submode=11`, `[2:1]=00`, `[0]=0/1`: `SET_DIR RIGHT/LEFT`.
-- Other encodings reserved.
-- `WAIT` spends exactly `D` clocks in its EXECUTE phase; fetch time and any intervening instructions are **additional** and must be included when deriving protocol timing.
-- One global shift direction applies to both `SHIFT_IN` and `SHIFT_OUT`; reset is RIGHT.
+- Other encodings are reserved, including `21` and `22`; START/DONE have been removed.
+- WAIT now specifies an interval **between timer-WAIT completion edges**, including all intervening fetches and execution. At the next WAIT, hardware subtracts elapsed clocks from D and blocks only for the remainder. The completion edge resets the elapsed counter.
+- The first timer WAIT after reset has no preceding reference: it spends D execution clocks (plus one fetch) establishing the reference. WAIT_C only changes T and never resets an existing reference. SET_DIR does not reset it. WAIT_PIN completion establishes a fresh reference at the observed external event.
+- If a WAIT reaches its execution edge after D has already elapsed, it retires immediately and raises sticky `timing_overrun`. Exact-deadline completion does not raise it. The flag clears on reset; late completion becomes the next reference. No wraparound or catch-up bursts occur.
+- Put WAIT immediately before each timed output. Equal delays from WAIT completion to output commit cancel, so FULL/HALF/QUARTER specify the corresponding pin intervals. Different instructions after WAIT can change these offsets; this is not a GPIO scheduler.
+- Minimum achievable intervals still depend on the instructions between WAIT completions. T=8 can support the provided FULL/FULL loop, but a four-clock HALF cannot accommodate its seven-clock loop path. The FULL/HALF example therefore uses T=16.
+- One global shift direction applies to SHIFT_IN and SHIFT_OUT; reset is RIGHT.
 
 ### `010 PIN_CTRL` (1-byte wait, 2-byte branch)
 - Byte 0: `[7:5]=010`, `[4:3]=pin`, `[2:1]=condition`, `[0]=mode`.
@@ -60,6 +64,7 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
   - `condition=11`: `[4]` must be zero; `[3]=0` means `BR_TRUE target`; `[3]=1` means `BR_FALSE target`. (This reuses the low pin-select bit to invert the comparison flag.)
 - `BR_TRUE` / `BR_FALSE` inspect the persistent comparison flag last written by a `CMP` instruction; they do not read the GPIO input.
 - Level waits complete once the sampled synchronized input has the requested logic level. Edge waits detect an input transition **while the instruction is armed in EXECUTE**. An edge that occurred before arming is not guaranteed to be caught.
+- Every completed WAIT_PIN resets the elapsed timer count to zero and establishes a timing reference. This anchors following HALF/FULL waits to an external event, including after idle gaps. It does not clear sticky timing_overrun.
 - Normal pin reads report 0/1, never high impedance.
 - Any **taken** non-LOOP branch clears the active loop state. This prohibits conditional flow inside a live loop in v1 (except fall-through conditions).
 

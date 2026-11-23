@@ -1,0 +1,9 @@
+// Ten pulses: 16 clocks HIGH and 8 clocks LOW between pulses.
+@00
+00 10   // 00: WAIT_C 16
+28      // 02: pulse: WAIT HALF (low interval)
+A1      // 03: SHIFT_OUT R0, P0, HIGH
+20      // 04: WAIT FULL (high interval)
+A0      // 05: SHIFT_OUT R0, P0, LOW
+6A 02   // 06: LOOP 10, pulse
+44 08   // 08: done: JMP done

@@ -7,7 +7,8 @@ module protocol_core (
     output logic [7:0] inst_addr,
     input  logic [3:0] gpio_in_async,
     output logic [3:0] gpio_out_value,
-    output logic [3:0] gpio_out_enable
+    output logic [3:0] gpio_out_enable,
+    output logic       timing_overrun // Sticky until reset: a WAIT interval was missed.
 );
     import isa_pkg::*;
 
@@ -15,6 +16,7 @@ module protocol_core (
     logic ir_load, imm_load;
     logic [1:0] pc_sel;
     logic wait_c_write, wait_start, wait_tick;
+    logic wait_rebase;
     logic [1:0] wait_mode;
     logic [T_WIDTH-1:0] t_write_data;
     logic wait_c_nonzero, wait_is_single_cycle, wait_is_last_cycle;
@@ -48,6 +50,7 @@ module protocol_core (
         .gpio_in_sync(gpio_in_sync), .gpio_sync_valid(gpio_sync_valid),
         .cmp_flag(cmp_flag), .ir_load(ir_load), .imm_load(imm_load),
         .wait_start(wait_start), .wait_c_write(wait_c_write),
+        .wait_rebase(wait_rebase),
         .wait_mode(wait_mode), .wait_tick(wait_tick), .pc_sel(pc_sel),
         .direction(direction), .exec_shift_in(exec_shift_in),
         .exec_shift_out(exec_shift_out), .exec_mov_imm(exec_mov_imm),
@@ -59,7 +62,9 @@ module protocol_core (
     wait_timer u_timer (
         .clk(clk), .rst(reset), .wait_c_write(wait_c_write),
         .t_write_data(t_write_data), .wait_start(wait_start),
+        .wait_rebase(wait_rebase),
         .wait_mode(wait_mode), .wait_tick(wait_tick),
+        .timing_overrun(timing_overrun),
         .wait_is_single_cycle(wait_is_single_cycle),
         .wait_is_last_cycle(wait_is_last_cycle)
     );

@@ -1,0 +1,65 @@
+{
+  "extensionVersion": "1.6.1",
+  "fileName": "/Users/jackkuzmicki/Documents/Engineering Projects/Jane street/protocol-emulator-asic/build/protocol_core.vcd",
+  "markerTime": 925000,
+  "altMarkerTime": null,
+  "displayTimeUnit": "ps",
+  "selectedSignal": {
+    "name": "tb_protocol_core.clk",
+    "msb": -1,
+    "lsb": -1
+  },
+  "zoomRatio": 0.002052758294309376,
+  "scrollLeft": 802112,
+  "defaultPixelTime": 1000000,
+  "displayedSignals": [
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 9,
+      "name": "clk",
+      "scopePath": [
+        "tb_protocol_core"
+      ],
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "clk",
+      "renderType": "binary",
+      "valueLinkEnable": false
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 11,
+      "name": "reset",
+      "scopePath": [
+        "tb_protocol_core"
+      ],
+      "numberFormat": "binary",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "reset",
+      "renderType": "binary",
+      "valueLinkEnable": false
+    },
+    {
+      "dataType": "netlist-variable",
+      "netlistId": 2,
+      "name": "gpio_out_value",
+      "scopePath": [
+        "tb_protocol_core"
+      ],
+      "numberFormat": "hexadecimal",
+      "colorIndex": 0,
+      "rowHeight": 1,
+      "verticalScale": 1,
+      "nameType": "fullPath",
+      "customName": "gpio_out_value",
+      "renderType": "multiBit",
+      "valueLinkEnable": false
+    }
+  ]
+}

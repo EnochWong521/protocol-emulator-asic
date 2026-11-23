@@ -1,0 +1,17 @@
+@00
+03 64   // 00: WAIT_C 868
+38      // 02: SET_DIR RIGHT
+4F      // 03: rx_start: WAIT_PIN P1, FALLING
+28      // 04: WAIT HALF
+4A 03   // 05: BRANCH_PIN P1, HIGH, rx_start
+20      // 07: rx_bits: WAIT FULL
+94      // 08: SHIFT_IN R1, P1
+68 07   // 09: LOOP 8, rx_bits
+20      // 0B: WAIT FULL
+48 12   // 0C: BRANCH_PIN P1, LOW, framing_error
+C8      // 0E: MOV R0, R1
+A9      // 0F: SHIFT_OUT R0, P2, HIGH (valid marker)
+44 03   // 10: JMP rx_start
+AD      // 12: framing_error: SHIFT_OUT R0, P3, HIGH
+4B      // 13: WAIT_PIN P1, HIGH
+44 03   // 14: JMP rx_start

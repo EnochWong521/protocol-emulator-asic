@@ -20,7 +20,7 @@ module tb_control_unit_fetch;
         32'h00000000, // 001: WAIT / SET_DIR
         32'hFFFFFFFF  // 000: WAIT_C
     };
-    // Bits 0, 8, 16, 24, 25: WAIT FULL/HALF/QUARTER and SET_DIR RIGHT/LEFT.
+    // WAIT FULL/HALF/QUARTER and SET_DIR RIGHT/LEFT.
     localparam logic [31:0] LEGAL_WAIT_ENCODINGS = 32'h03010101;
     // Every fourth SHIFT_IN encoding is legal: its low two bits must be zero.
     localparam logic [31:0] LEGAL_SHIFT_IN_ENCODINGS = 32'h11111111;

@@ -1,0 +1,17 @@
+// UART TX 0x55 on P0, 8N1, T=868 clocks/bit.
+@00
+03 64   // 00: WAIT_C 868
+38      // 02: SET_DIR RIGHT
+C0 55   // 03: MOV R0, 0x55
+20      // 05: WAIT FULL (initial timing reference)
+A1      // 06: SHIFT_OUT R0, P0, HIGH (idle)
+20      // 07: WAIT FULL
+A0      // 08: SHIFT_OUT R0, P0, LOW (start)
+20      // 09: tx_bits: WAIT FULL
+A3      // 0A: SHIFT_OUT R0, P0, SHIFT
+68 09   // 0B: LOOP 8, tx_bits
+20      // 0D: WAIT FULL
+A1      // 0E: SHIFT_OUT R0, P0, HIGH (stop)
+20      // 0F: WAIT FULL
+A1      // 10: SHIFT_OUT R0, P0, HIGH (stop complete, remain idle)
+44 11   // 11: done: JMP done

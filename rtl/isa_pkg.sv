@@ -80,7 +80,7 @@ package isa_pkg;
     // ------------------------------------------------------------
     // 001: WAIT / SET_DIR (1 byte)
     // IR[4:3] = submode; IR[2:0] = argument
-    // WAIT requires argument == 000.
+    // WAIT requires argument == 000; other arguments remain reserved.
     // SET_DIR requires IR[2:1] == 00 and uses IR[0].
     // ------------------------------------------------------------
     localparam int WAIT_SUBMODE_MSB     = 4;

@@ -13,6 +13,7 @@ module control_unit (
     output  logic         ir_load,
     output  logic         imm_load,
     output  logic         wait_start,
+    output  logic         wait_rebase,
     output  logic         wait_c_write,
     output  logic [1:0]   wait_mode,
     output  logic         wait_tick,
@@ -116,6 +117,7 @@ module control_unit (
         branch_legal = 1'b0;
 
         wait_start = 1'b0;
+        wait_rebase = 1'b0;
         wait_c_write = 1'b0;
         wait_tick = 1'b0;
         exec_shift_in = 1'b0;
@@ -161,7 +163,7 @@ module control_unit (
                             next_state = FETCH;
                         end
 
-                        //WAIT
+                        // WAIT accounts for clocks since the previous WAIT completed.
                         else if(ir[WAIT_SUBMODE_MSB:WAIT_SUBMODE_LSB] != SET_DIR &&
                                 ir[WAIT_ARG_MSB:WAIT_ARG_LSB] == WAIT_ARG_REQUIRED) begin
                             wait_start = 1'b1;
@@ -209,6 +211,7 @@ module control_unit (
                                         (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB] == PIN_WAIT_HIGH)) begin
                                         pc_sel = PC_PLUS_1;
                                         next_state = FETCH;
+                                        wait_rebase = 1'b1;
                                         next_edge_armed = 1'b0;
                                     end
                                 end
@@ -225,6 +228,7 @@ module control_unit (
                                               edge_prev && !selected_pin_sync)) begin
                                         pc_sel = PC_PLUS_1;
                                         next_state = FETCH;
+                                        wait_rebase = 1'b1;
                                         next_edge_armed = 1'b0;
                                     end
                                 end
