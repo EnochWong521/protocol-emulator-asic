@@ -7,3 +7,11 @@
 
 # Windows metadata
 *:Zone.Identifier
+
+# Vivado project and generated outputs
+/fpga/build/
+
+# Vivado files created when launched from the repository root
+/.Xil/
+/vivado*.jou
+/vivado*.log
