@@ -1,5 +1,5 @@
 module instruction_rom #(
-    parameter INIT_FILE = "pin_pulse.mem"
+    parameter INIT_FILE = "uart_tx_8n1_125mhz.mem"
 ) (
     input  wire [7:0] addr,
     output wire [7:0] data

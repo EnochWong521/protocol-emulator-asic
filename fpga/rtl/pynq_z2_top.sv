@@ -1,7 +1,8 @@
 module pynq_z2_top (
     input  wire       clk_125,
     input  wire       reset_sw,
-    inout  wire [3:0] gpio
+    inout  wire [3:0] gpio,
+    output wire clk_debug
 );
     (* ASYNC_REG = "TRUE" *) logic [1:0] reset_sync = 2'b11;
     wire core_reset = reset_sync[1];
@@ -41,4 +42,13 @@ module pynq_z2_top (
             .IO(gpio[pin])
         );
     end
+    
+    // expose clock for debugging
+    logic [4:0] clk_div = 5'd0;
+
+    always_ff @(posedge clk_125) begin
+        clk_div <= clk_div + 5'd1;
+    end
+    
+    assign clk_debug = clk_div[4];
 endmodule
