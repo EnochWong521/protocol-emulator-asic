@@ -9,6 +9,7 @@ module control_unit (
     input   logic [3:0]   gpio_in_sync, // Shared shift_datapath synchronizer output.
     input   logic         gpio_sync_valid,
     input   logic         cmp_flag,     // Persistent cmp_datapath result.
+    input   logic         pin_mode_valid, // Operand upper nibble is zero.
 
     output  logic         ir_load,
     output  logic         imm_load,
@@ -21,6 +22,7 @@ module control_unit (
     output  logic         direction,
     output  logic         exec_shift_in,
     output  logic         exec_shift_out,
+    output  logic         exec_pin_mode,
     output  logic         exec_mov_imm,
     output  logic         exec_mov_reg,
     output  logic         exec_cmp_imm,
@@ -122,6 +124,7 @@ module control_unit (
         wait_tick = 1'b0;
         exec_shift_in = 1'b0;
         exec_shift_out = 1'b0;
+        exec_pin_mode = 1'b0;
         exec_mov_imm = 1'b0;
         exec_mov_reg = 1'b0;
         exec_cmp_imm = 1'b0;
@@ -204,7 +207,14 @@ module control_unit (
                         end
                     end
                     else if (ir[OPCODE_MSB:OPCODE_LSB] == OP_PIN_CTRL) begin
-                        if (ir[PIN_CTRL_MODE_BIT] == PIN_WAIT_MODE && gpio_sync_valid) begin
+                        if (ir == INST_PIN_MODE) begin
+                            if (pin_mode_valid) begin
+                                exec_pin_mode = 1'b1;
+                                pc_sel = PC_PLUS_2;
+                                next_state = FETCH;
+                            end
+                        end
+                        else if (ir[PIN_CTRL_MODE_BIT] == PIN_WAIT_MODE && gpio_sync_valid) begin
                             case (ir[PIN_CTRL_COND_MSB:PIN_CTRL_COND_LSB])
                                 PIN_WAIT_LOW, PIN_WAIT_HIGH: begin
                                     if (selected_pin_sync ==

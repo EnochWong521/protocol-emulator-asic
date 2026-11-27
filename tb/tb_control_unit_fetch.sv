@@ -73,6 +73,7 @@ module tb_control_unit_fetch;
 
     control_unit dut (
         .clk(clk), .reset(reset), .inst(inst), .ir(ir), .wait_c_nonzero(wait_c_nonzero),
+        .pin_mode_valid(imm[7:4] == 0),
         .gpio_in_sync(4'b0000), .cmp_flag(1'b0),
         .gpio_sync_valid(1'b1), // Standalone controller inputs are already usable.
         .ir_load(ir_load), .imm_load(imm_load), .pc_sel(pc_sel),

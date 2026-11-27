@@ -1,6 +1,6 @@
 # Protocol Emulator ISA — Current Encoding Reference
 
-Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and unsigned EQ/LT/GT comparison have standalone/controller verification. LOOP and all legal PIN_CTRL modes have controller execution logic and PC target loading; their verification is deferred. The complete `protocol_core`, instruction-level datapath integration, and DATA_IO remain pending. The microarchitecture documents define module ownership and timing; `rtl/isa_pkg.sv` supplies shared encoding constants.
+Status: **Partial RTL implementation.** The integrated `protocol_core` implements WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, unsigned EQ/LT/GT comparison, LOOP and PIN_CTRL including PIN_MODE. UART, SPI and single-controller I2C have simulation examples; physical bus validation remains separate. DATA_IO execution and the host transport remain pending. The microarchitecture documents define module ownership and timing; `rtl/isa_pkg.sv` supplies shared encoding constants.
 
 ## Design contract
 
@@ -9,6 +9,7 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 - Instructions occupy 1 or 2 bytes. First byte always has the opcode; the opcode and submode determine the length. A 2-byte instruction has its payload at `PC+1`.
 - One sequential, non-pipelined engine. Two 8-bit data registers, `R0` and `R1`.
 - Four protocol pins `P0..P3`, selected by 2 bits; each has output-value, output-enable, and synchronized input. Input can be read as 0 or 1; Z is **output release**, not an input condition.
+- One four-bit open-drain mask, written by PIN_MODE; reset selects push-pull on all pins while leaving every output released.
 - Single 13-bit time-base register `T`, one timing countdown, one 5-bit hardware loop counter and `loop_active`, one comparison flag, one shift direction flag.
 - No general data RAM or ALU in v1. One host-to-engine mailbox and one engine-to-host mailbox (each 8 bits plus valid/ready semantics).
 - `PULL` and `PUSH` are architectural operations; the physical host and program-loading interface is **separate** and must be designed before tapeout. During initial RTL testing the testbench can supply that interface.
@@ -20,7 +21,7 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 |---|---|---|---|
 | `000` | `WAIT_C` | 2 | Configure 13-bit base period `T` |
 | `001` | `WAIT` / `SET_DIR` | 1 | Wait full/half/quarter `T`, or configure shift direction |
-| `010` | `PIN_CTRL` | 1 or 2 | Wait for level/edge, conditional branch, or unconditional jump |
+| `010` | `PIN_CTRL` | 1 or 2 | Wait for level/edge, branch/jump, or configure open-drain pins |
 | `011` | `LOOP` | 2 | Bottom-of-loop repetition |
 | `100` | `SHIFT_IN` | 1 | Sample one pin bit and shift it into a register |
 | `101` | `SHIFT_OUT` | 1 | Drive low/high/release or shift out one bit |
@@ -50,23 +51,71 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 - Minimum achievable intervals still depend on the instructions between WAIT completions. T=8 can support the provided FULL/FULL loop, but a four-clock HALF cannot accommodate its seven-clock loop path. The FULL/HALF example therefore uses T=16.
 - One global shift direction applies to SHIFT_IN and SHIFT_OUT; reset is RIGHT.
 
-### `010 PIN_CTRL` (1-byte wait, 2-byte branch)
-- Byte 0: `[7:5]=010`, `[4:3]=pin`, `[2:1]=condition`, `[0]=mode`.
-- `mode=1`: 1-byte WAIT operation; no second byte:
-  - `condition=00`: `WAIT_PIN pin, LOW` (level).
-  - `condition=01`: `WAIT_PIN pin, HIGH` (level).
-  - `condition=10`: `WAIT_PIN pin, RISING` (edge).
-  - `condition=11`: `WAIT_PIN pin, FALLING` (edge).
-- `mode=0`: 2-byte branch; Byte 1 is **absolute byte address** (0..255):
-  - `condition=00`: `BRANCH_PIN pin, LOW, target`.
-  - `condition=01`: `BRANCH_PIN pin, HIGH, target`.
-  - `condition=10`: `JMP target`; pin field ignored.
-  - `condition=11`: `[4]` must be zero; `[3]=0` means `BR_TRUE target`; `[3]=1` means `BR_FALSE target`. (This reuses the low pin-select bit to invert the comparison flag.)
-- `BR_TRUE` / `BR_FALSE` inspect the persistent comparison flag last written by a `CMP` instruction; they do not read the GPIO input.
-- Level waits complete once the sampled synchronized input has the requested logic level. Edge waits detect an input transition **while the instruction is armed in EXECUTE**. An edge that occurred before arming is not guaranteed to be caught.
-- Every completed WAIT_PIN resets the elapsed timer count to zero and establishes a timing reference. This anchors following HALF/FULL waits to an external event, including after idle gaps. It does not clear sticky timing_overrun.
-- Normal pin reads report 0/1, never high impedance.
-- Any **taken** non-LOOP branch clears the active loop state. This prohibits conditional flow inside a live loop in v1 (except fall-through conditions).
+### `010 PIN_CTRL` (1-byte wait, 2-byte branch/configuration)
+
+- Byte 0: `[7:5]=010`, `[4:3]=pin/function`, `[2:1]=condition`, `[0]=mode`.
+- `[4:3]` selects P0..P3 except for `mode=0, condition=11`, where it selects a flag branch or configuration operation.
+- Instruction length depends only on `mode`: `1` means one byte; `0` means two bytes, including reserved encodings.
+
+#### `mode=1`: WAIT_PIN — one byte
+
+`[4:3]` selects the pin. No second byte is fetched.
+
+- `condition=00`: `WAIT_PIN pin, LOW` — wait for a LOW level.
+- `condition=01`: `WAIT_PIN pin, HIGH` — wait for a HIGH level.
+- `condition=10`: `WAIT_PIN pin, RISING` — wait for a rising edge.
+- `condition=11`: `WAIT_PIN pin, FALLING` — wait for a falling edge.
+
+Level waits complete when the synchronized input has the requested level. Edge waits detect a transition **while the instruction is armed in EXECUTE**; an edge occurring before arming is not guaranteed to be caught. WAIT_PIN holds until synchronized GPIO samples are valid.
+
+Every completed WAIT_PIN resets the elapsed timer count and establishes a new timing reference, including after idle gaps or I2C clock stretching. It does not clear sticky `timing_overrun`. On completion, PC advances by 1. Pin reads report 0/1, never readable high impedance; released inputs require an appropriate electrical bias.
+
+#### `mode=0`: branch/configuration — two bytes
+
+Byte 1 is an **absolute byte address** for branches, or a **mode mask** for PIN_MODE.
+
+- `condition=00`: `BRANCH_PIN pin, LOW, target`; `[4:3]` selects the pin.
+- `condition=01`: `BRANCH_PIN pin, HIGH, target`; `[4:3]` selects the pin.
+- `condition=10`: `JMP target`; unconditional branch, `[4:3]` ignored.
+- `condition=11`: `[4:3]` selects the operation:
+
+| `[4:3]` | Byte 0 | Operation | Byte 1 |
+|---|---|---|---|
+| `00` | `46` | `BR_TRUE target` | Absolute target address |
+| `01` | `4E` | `BR_FALSE target` | Absolute target address |
+| `10` | `56` | `PIN_MODE mask8` | Pin-mode mask |
+| `11` | `5E` | Reserved | Reserved |
+
+BR_TRUE and BR_FALSE inspect the persistent comparison flag last written by CMP; they do not read GPIO. Pin-level branches wait until synchronized GPIO samples are valid. JMP, flag branches, and PIN_MODE do not depend on GPIO sample validity.
+
+For branches, Byte 1 is an absolute byte address from 0..255. A taken branch loads PC from Byte 1 and clears the active loop state. An untaken branch advances PC by 2 and preserves loop state. Taken conditional branches inside a live counted loop therefore abort that loop in v1.
+
+#### `PIN_MODE mask8` — encoding `56 mask8`
+
+| Byte 1 bits | Meaning |
+|---|---|
+| `[7:4]` | Reserved; must be `0000` |
+| `[3]` | P3 output mode |
+| `[2]` | P2 output mode |
+| `[1]` | P1 output mode |
+| `[0]` | P0 output mode |
+
+Each mode bit selects:
+
+- `0`: **push-pull** — enabled output actively drives its stored logical value.
+- `1`: **open-drain** — enabled output drives LOW for logical `0` and releases the pin for logical `1`.
+
+The mode applies to both fixed-value and shifted SHIFT_OUT operations. Explicit RELEASE always releases the pin, regardless of mode.
+
+PIN_MODE replaces the entire four-bit mask at its retiring EXECUTE edge. Existing logical output values and drive requests are retained; effective pad drive follows the new mode. Physical `gpio_out_value` is held LOW on open-drain pins, and registered `gpio_out_enable` performs drive/release. The stored logical value remains separate, so returning to push-pull restores the previous requested value unless explicitly released.
+
+PIN_MODE preserves R0/R1, comparison flag, shift direction, active loop state, and timer configuration/reference. It does not clear `timing_overrun`. It completes in three clocks (FETCH, FETCH_OPERAND, EXECUTE), advances PC by 2, and does not branch.
+
+The mask resets to `0000` (all push-pull). Output enables still reset to zero, releasing every pin. Pull-ups are a separate electrical configuration; PIN_MODE does not enable them.
+
+Example: `PIN_MODE 0x03`, encoded `56 03`, makes P0/P1 open-drain and P2/P3 push-pull.
+
+`5E` and PIN_MODE operands with nonzero `[7:4]` are reserved. They hold PC in EXECUTE without register, flag, GPIO, or configuration writes, matching the existing illegal-instruction behavior.
 
 ### `011 LOOP count, target` (2 bytes)
 - Byte 0: `[7:5]=011`, `[4:0]=count`.
@@ -87,14 +136,14 @@ Status: **Partial RTL implementation.** WAIT/WAIT_C, SET_DIR, SHIFT, MOVE, and u
 
 ### `101 SHIFT_OUT reg, pin, mode` (1 byte)
 - Byte 0: `[7:5]=101`, `[4]=reg (0=R0,1=R1)`, `[3:2]=pin`, `[1:0]=mode`.
-- `mode=00`: drive pin 0 (`oe=1`, `out=0`), do not shift.
-- `mode=01`: drive pin 1 (`oe=1`, `out=1`), do not shift.
+- `mode=00`: request logical LOW and enable drive; do not shift.
+- `mode=01`: request logical HIGH and enable drive; do not shift. Open-drain mode releases the pad instead of driving HIGH.
 - `mode=10`: release pin (`oe=0`, high-Z), do not shift.
-- `mode=11`: drive register endpoint bit and shift selected register **once**:
-  - RIGHT: `out <- Rn[0]`, `Rn <- {0, Rn[7:1]}`, `oe=1`.
-  - LEFT: `out <- Rn[7]`, `Rn <- {Rn[6:0], 0}`, `oe=1`.
+- `mode=11`: request the register endpoint bit and shift selected register **once**; PIN_MODE determines its physical drive/release:
+  - RIGHT: `logical_out <- Rn[0]`, `Rn <- {0, Rn[7:1]}`, `request_enable=1`.
+  - LEFT: `logical_out <- Rn[7]`, `Rn <- {Rn[6:0], 0}`, `request_enable=1`.
 - Output updates at the retiring EXECUTE clock edge. Fixed modes ignore the register selection bit.
-- I2C logical high is represented by RELEASE plus an **external pull-up**, not an actively driven 1.
+- For open-drain pins, physical `gpio_out_value=0` and `gpio_out_enable=request_enable AND NOT logical_value`. I2C HIGH uses release plus a physical pull-up, either through explicit RELEASE or logical HIGH/SHIFT with the pin's mode bit set. The core never actively drives an open-drain pin HIGH.
 
 ### `110 MOVE` group (1 or 2 bytes)
 
@@ -139,7 +188,7 @@ MOV preserves `cmp_flag`; CMP preserves R0/R1. The flag resets to zero and holds
 
 - Synchronous, active-high `rst` for first RTL implementation (reset style can be adapted at the Tiny Tapeout wrapper).
 - `PC=0`, `R0=0`, `R1=0`, `T=4`, `shift_dir=RIGHT`, `cmp_flag=0`, `loop_active=0`, `loop_remaining=0`.
-- GPIO outputs default **high-Z** (`oe=0`). UART firmware must drive TX high before sending.
+- GPIO outputs default **high-Z** (`oe=0`); `open_drain_mask=0000` (push-pull). UART firmware must drive TX high before sending; I2C firmware must configure open-drain pins before use.
 - Host mailboxes initially invalid/empty. Wait counter cleared; execution starts at PC0 after reset.
 - Two-flop synchronizer per input pin; branch and shift operations read synchronized values only.
 - GPIO sample validity resets low and rises after both synchronizer stages fill. SHIFT_IN, WAIT_PIN, and pin-level branches hold until valid; edge waits establish their baseline only then. Initial pin instructions may require extra startup clocks. JMP, flag branches, and timer WAIT are independent of GPIO validity.
@@ -221,7 +270,7 @@ For early RTL simulation, memory may use `$readmemh` and the host mailbox may be
 3. `SHIFT_OUT R0` right eight times emits `1,0,1,0,0,1,0,1`.
 4. `SHIFT_IN R1` right while receiving those eight bits yields R1=`0xA5`.
 5. `LOOP 8,target` executes the body exactly eight times, including the first pass.
-6. `PIN_CTRL` correctly handles low/high, rising/falling, conditional branch, unconditional jump, true/false comparison-flag conditions.
+6. `PIN_CTRL` correctly handles low/high, rising/falling, conditional branch, unconditional jump, true/false comparison-flag conditions, and PIN_MODE masks/invalid operands.
 7. `PULL` and `PUSH` stall safely and each transfer exactly one byte on handshake.
 8. Reset releases protocol outputs; I2C-style released output is never misinterpreted as readable Z.
 9. UART TX meets chosen baud tolerance when cycles are measured **pin-edge to pin-edge**.

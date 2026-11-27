@@ -12,6 +12,7 @@ module tb_gpio_sync_startup;
     wire [7:0] inst = memory[inst_addr];
     wire ir_load, imm_load, direction, reg_sel;
     wire exec_shift_in, exec_shift_out, exec_mov_imm, exec_mov_reg;
+    wire exec_pin_mode;
     wire [1:0] pc_sel, pin_sel, shift_out_mode;
     wire [3:0] gpio_in_sync;
     wire gpio_sync_valid;
@@ -29,6 +30,7 @@ module tb_gpio_sync_startup;
     );
     control_unit ctrl (
         .clk(clk), .reset(reset), .inst(inst), .ir(ir),
+        .pin_mode_valid(imm[7:4] == 0), .exec_pin_mode(exec_pin_mode),
         .wait_c_nonzero(1'b1), .wait_is_single_cycle(1'b1),
         .wait_is_last_cycle(1'b0), .cmp_flag(1'b0),
         .gpio_in_sync(gpio_in_sync), .gpio_sync_valid(gpio_sync_valid),
@@ -40,6 +42,7 @@ module tb_gpio_sync_startup;
     );
     shift_datapath datapath (
         .clk(clk), .rst(reset), .exec_shift_in(exec_shift_in),
+        .exec_pin_mode(exec_pin_mode),
         .exec_shift_out(exec_shift_out), .exec_mov_imm(exec_mov_imm),
         .exec_mov_reg(exec_mov_reg), .reg_sel(reg_sel), .pin_sel(pin_sel),
         .shift_out_mode(shift_out_mode), .shift_dir(direction), .imm_data(imm),

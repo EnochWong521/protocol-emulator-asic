@@ -161,15 +161,15 @@ mode=1: WAIT_PIN, 1 byte, no IMM
   condition=10: wait for RISING edge while armed
   condition=11: wait for FALLING edge while armed
 
-mode=0: branch, 2 bytes, IMM is absolute target
+mode=0: branch/configuration, 2 bytes, IMM is target or mask
   condition=00: BRANCH_PIN pin, LOW, IMM
   condition=01: BRANCH_PIN pin, HIGH, IMM
   condition=10: JMP IMM; pin bits ignored
-  condition=11: IR[4] must be 0; IR[3]=0 -> BR_TRUE IMM;
-                              IR[3]=1 -> BR_FALSE IMM
+  condition=11: IR[4:3]=00 -> BR_TRUE IMM; 01 -> BR_FALSE IMM;
+                              10 -> PIN_MODE IMM; 11 -> reserved
 ```
 
-**Reserved:** `mode=0`, `condition=11`, `IR[4]=1`. The decoder rejects this encoding; current reserved instructions stall without writes and have no trap/fault output; do not silently treat it as `BR_FALSE` or `JMP`.
+**PIN_MODE update:** `56 mask8` writes `shift_datapath.open_drain_mask` from IMM[3:0], with IMM[7:4] required to be zero. The controller receives `pin_mode_valid`, asserts `exec_pin_mode` for one retirement edge, advances PC by two and preserves loop/flag/timer state. Physical open-drain pad data stays LOW; registered output-enable implements LOW versus release while logical values/requests are retained. See the ISA reference for complete semantics. `5E` and invalid mask operands remain reserved and stall without writes.
 
 ### 4.2 Pin input datapath
 

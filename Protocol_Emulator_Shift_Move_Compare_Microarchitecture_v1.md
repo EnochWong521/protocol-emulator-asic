@@ -95,8 +95,10 @@ Every architectural register has one owner. There is one R0/R1 bank, one directi
 | State | Width | Reset | Only writer / owner |
 |---|---:|---|---|
 | R0, R1 | 8 each | 0 | `register_file` (B), using its single write port |
-| `gpio_out_value` | 4 | 0 | `shift_datapath` (B) |
-| `gpio_out_enable` | 4 | 0 (pins released) | `shift_datapath` (B) |
+| `gpio_value_latch`, `gpio_drive_request` | 4 each | 0 | `shift_datapath` (B), logical GPIO state |
+| `open_drain_mask` | 4 | 0 (push-pull) | `shift_datapath` (B), written by PIN_MODE |
+| `gpio_out_value` | 4 | 0 | `shift_datapath` (B), logical value masked LOW for open-drain pins |
+| `gpio_out_enable` | 4 | 0 (pins released) | `shift_datapath` (B), registered physical pad enable |
 | GPIO sync stage 1 / stage 2 | 4 each | 0 | `shift_datapath` (B) |
 | `cmp_flag` | 1 | 0 | `cmp_datapath` (A) |
 | `direction` | 1 | RIGHT = 0 | `control_unit` (A); wired to B's `shift_dir` |

@@ -1,0 +1,22 @@
+// Mode 0, MSB first, 0xA5 TX. P0=SCLK P1=MOSI P2=MISO P3=CS_n.
+// T=64 clocks per half-period; 976.5625 kHz at 125 MHz.
+@00
+AD          // 00: CS HIGH
+A0          // 01: SCLK LOW
+A4          // 02: MOSI LOW
+39          // 03: SET_DIR LEFT
+C0 A5       // 04: MOV R0, 0xA5
+D0 00       // 06: MOV R1, 0
+00 40       // 08: WAIT_C 64
+20          // 0A: WAIT FULL
+AC          // 0B: CS LOW
+A7          // 0C: bits: shift R0 -> MOSI
+20          // 0D: WAIT FULL
+A1          // 0E: SCLK HIGH
+98          // 0F: MISO -> R1
+20          // 10: WAIT FULL
+A0          // 11: SCLK LOW
+68 0C       // 12: LOOP 8, bits
+20          // 14: WAIT FULL
+AD          // 15: CS HIGH
+44 16       // 16: done: JMP done

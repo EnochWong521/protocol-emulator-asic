@@ -3,6 +3,7 @@ module shift_datapath (
     input  logic       rst,
     input  logic       exec_shift_in,
     input  logic       exec_shift_out,
+    input  logic       exec_pin_mode,
     input  logic       exec_mov_imm,
     input  logic       exec_mov_reg,
     input  logic       reg_sel,          // 0 selects R0; 1 selects R1
@@ -25,6 +26,22 @@ module shift_datapath (
     logic [7:0] selected_reg;
     logic       write_en;
     logic [7:0] write_data;
+    logic [3:0] open_drain_mask;
+    logic [3:0] gpio_drive_request;
+    logic [3:0] gpio_value_latch;
+
+    // Keep logical requests separate from the physical pad enables.
+    // Open-drain HIGH releases the pad; LOW still drives it.
+    // In open-drain mode the pad's data input is always LOW, including while
+    // released. Only its enable switches, so it cannot transiently drive HIGH.
+    assign gpio_out_value = gpio_value_latch & ~open_drain_mask;
+
+    always_ff @(posedge clk) begin
+        if (rst)
+            open_drain_mask <= PIN_MODE_RESET;
+        else if (exec_pin_mode)
+            open_drain_mask <= imm_data[PIN_MODE_MASK_MSB:PIN_MODE_MASK_LSB];
+    end
 
 
     register_file registers (
@@ -98,30 +115,40 @@ module shift_datapath (
 
     always_ff @(posedge clk) begin
         if (rst) begin
-            gpio_out_value  <= 4'b0000;
+            gpio_value_latch <= 4'b0000;
+            gpio_drive_request <= 4'b0000;
             gpio_out_enable <= 4'b0000;
+        end
+        else if (exec_pin_mode) begin
+            gpio_out_enable <= gpio_drive_request &
+                               ~(imm_data[PIN_MODE_MASK_MSB:PIN_MODE_MASK_LSB] & gpio_value_latch);
         end
         else if (exec_shift_out) begin
             case (shift_out_mode)
                 SHIFT_OUT_LOW: begin
-                    gpio_out_value[pin_sel]  <= 1'b0;
+                    gpio_value_latch[pin_sel] <= 1'b0;
+                    gpio_drive_request[pin_sel] <= 1'b1;
                     gpio_out_enable[pin_sel] <= 1'b1;
                 end
                 SHIFT_OUT_HIGH: begin
-                    gpio_out_value[pin_sel]  <= 1'b1;
-                    gpio_out_enable[pin_sel] <= 1'b1;
+                    gpio_value_latch[pin_sel] <= 1'b1;
+                    gpio_drive_request[pin_sel] <= 1'b1;
+                    gpio_out_enable[pin_sel] <= !open_drain_mask[pin_sel];
                 end
                 SHIFT_OUT_RELEASE: begin
                     // Retain the stored output value while releasing the pin.
+                    gpio_drive_request[pin_sel] <= 1'b0;
                     gpio_out_enable[pin_sel] <= 1'b0;
                 end
                 SHIFT_OUT_SHIFT: begin
-                    gpio_out_enable[pin_sel] <= 1'b1;
+                    gpio_drive_request[pin_sel] <= 1'b1;
                     if (shift_dir == DIR_RIGHT) begin
-                        gpio_out_value[pin_sel] <= selected_reg[0];
+                        gpio_value_latch[pin_sel] <= selected_reg[0];
+                        gpio_out_enable[pin_sel] <= !(open_drain_mask[pin_sel] && selected_reg[0]);
                     end
                     else begin
-                        gpio_out_value[pin_sel] <= selected_reg[7];
+                        gpio_value_latch[pin_sel] <= selected_reg[7];
+                        gpio_out_enable[pin_sel] <= !(open_drain_mask[pin_sel] && selected_reg[7]);
                     end
                 end
             endcase

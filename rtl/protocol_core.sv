@@ -23,6 +23,7 @@ module protocol_core (
     logic direction, reg_sel;
     logic exec_shift_in, exec_shift_out, exec_mov_imm, exec_mov_reg;
     logic exec_cmp_imm, exec_cmp_reg;
+    logic exec_pin_mode;
     logic [1:0] pin_sel, shift_out_mode, cmp_op;
     logic [3:0] gpio_in_sync;
     logic gpio_sync_valid, cmp_flag;
@@ -49,11 +50,13 @@ module protocol_core (
         .wait_is_last_cycle(wait_is_last_cycle),
         .gpio_in_sync(gpio_in_sync), .gpio_sync_valid(gpio_sync_valid),
         .cmp_flag(cmp_flag), .ir_load(ir_load), .imm_load(imm_load),
+        .pin_mode_valid(imm[PIN_MODE_RSVD_MSB:PIN_MODE_RSVD_LSB] == 4'b0000),
         .wait_start(wait_start), .wait_c_write(wait_c_write),
         .wait_rebase(wait_rebase),
         .wait_mode(wait_mode), .wait_tick(wait_tick), .pc_sel(pc_sel),
         .direction(direction), .exec_shift_in(exec_shift_in),
         .exec_shift_out(exec_shift_out), .exec_mov_imm(exec_mov_imm),
+        .exec_pin_mode(exec_pin_mode),
         .exec_mov_reg(exec_mov_reg), .exec_cmp_imm(exec_cmp_imm),
         .exec_cmp_reg(exec_cmp_reg), .reg_sel(reg_sel), .pin_sel(pin_sel),
         .shift_out_mode(shift_out_mode), .cmp_op(cmp_op)
@@ -72,6 +75,7 @@ module protocol_core (
     // shift_datapath owns the single shared R0/R1 register bank.
     shift_datapath u_shift (
         .clk(clk), .rst(reset), .exec_shift_in(exec_shift_in),
+        .exec_pin_mode(exec_pin_mode),
         .exec_shift_out(exec_shift_out), .exec_mov_imm(exec_mov_imm),
         .exec_mov_reg(exec_mov_reg), .reg_sel(reg_sel), .pin_sel(pin_sel),
         .shift_out_mode(shift_out_mode), .shift_dir(direction), .imm_data(imm),

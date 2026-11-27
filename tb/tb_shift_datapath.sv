@@ -26,6 +26,7 @@ module tb_shift_datapath;
     always #5 clk = ~clk;
     shift_datapath dut (
         .clk(clk), .rst(rst),
+        .exec_pin_mode(1'b0),
         .exec_shift_in(commands[3]), .exec_shift_out(commands[2]),
         .exec_mov_imm(commands[1]), .exec_mov_reg(commands[0]),
         .reg_sel(reg_sel), .pin_sel(pin_sel), .shift_out_mode(shift_out_mode),

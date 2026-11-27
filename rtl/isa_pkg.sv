@@ -101,13 +101,13 @@ package isa_pkg;
     } wait_mode_t;
 
     // ------------------------------------------------------------
-    // 010: PIN_CTRL (1-byte WAIT_PIN / 2-byte BRANCH)
+    // 010: PIN_CTRL (1-byte WAIT_PIN / 2-byte BRANCH or PIN_MODE)
     // IR[4:3] = pin field; IR[2:1] = condition; IR[0] = mode
     // Mode 1: WAIT_PIN, where the condition includes edge modes.
-    // Mode 0: BRANCH, where condition 10 means unconditional JMP.
-    // For branch condition 11, IR[4] must be 0 and IR[3]
-    // selects test of the comparison flag (true vs false).
-    // Branch destination = OPERAND_BYTE[7:0] (absolute PC).
+    // Mode 0: branch/configuration, where condition 10 means unconditional JMP.
+    // For condition 11 in mode 0, IR[4:3] selects:
+    // 00 BR_TRUE, 01 BR_FALSE, 10 PIN_MODE, 11 reserved.
+    // Operand = absolute branch PC or the PIN_MODE mask.
     // ------------------------------------------------------------
     localparam int PIN_CTRL_PIN_MSB       = 4;
     localparam int PIN_CTRL_PIN_LSB       = 3;
@@ -119,6 +119,13 @@ package isa_pkg;
     localparam int PIN_CTRL_FLAG_SENSE_BIT = 3;
     localparam int PIN_CTRL_TARGET_MSB   = 7;  // OPERAND_BYTE
     localparam int PIN_CTRL_TARGET_LSB   = 0;  // OPERAND_BYTE
+
+    localparam logic [7:0] INST_PIN_MODE = 8'h56;
+    localparam int PIN_MODE_MASK_MSB = 3; // OPERAND_BYTE
+    localparam int PIN_MODE_MASK_LSB = 0;
+    localparam int PIN_MODE_RSVD_MSB = 7;
+    localparam int PIN_MODE_RSVD_LSB = 4;
+    localparam logic [3:0] PIN_MODE_RESET = 4'b0000;
 
     typedef enum logic {
         PIN_BRANCH_MODE = 1'b0,

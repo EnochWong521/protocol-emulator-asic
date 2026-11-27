@@ -1,4 +1,6 @@
-module pynq_z2_top (
+module pynq_z2_top #(
+    parameter PROGRAM_FILE = "uart_tx_8n1_125mhz.mem"
+) (
     input  wire       clk_125,
     input  wire       reset_sw,
     inout  wire [3:0] gpio,
@@ -18,7 +20,7 @@ module pynq_z2_top (
         reset_sync <= {reset_sync[0], reset_sw};
     end
 
-    instruction_rom u_rom (
+    instruction_rom #(.INIT_FILE(PROGRAM_FILE)) u_rom (
         .addr(inst_addr),
         .data(inst)
     );
